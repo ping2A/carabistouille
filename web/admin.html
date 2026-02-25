@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin &mdash; Carabistouille</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body class="admin-body">
+  <header>
+    <div class="header-left">
+      <h1>Carabistouille</h1>
+      <span class="subtitle">Admin Dashboard</span>
+    </div>
+    <div class="header-right">
+      <a href="/" class="header-link">Analyzer</a>
+      <span id="agent-status" class="status disconnected">
+        <span class="status-dot"></span>
+        <span class="status-text">Agent disconnected</span>
+      </span>
+    </div>
+  </header>
+
+  <main class="admin-main">
+    <div class="admin-topbar">
+      <div class="admin-stats" id="admin-stats"></div>
+      <div class="admin-actions">
+        <button id="refresh-btn" class="action-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+          Refresh
+        </button>
+      </div>
+    </div>
+
+    <div class="admin-table-wrapper">
+      <table class="admin-table" id="analyses-table">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>URL</th>
+            <th>Created</th>
+            <th>Completed</th>
+            <th>Risk</th>
+            <th>Requests</th>
+            <th>Scripts</th>
+            <th>Redirects</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="analyses-tbody"></tbody>
+      </table>
+      <div class="admin-empty" id="admin-empty" style="display:none">No analyses yet</div>
+    </div>
+
+    <div class="admin-detail" id="admin-detail" style="display:none">
+      <div class="detail-header">
+        <h2 id="detail-title">Analysis Details</h2>
+        <button id="detail-close" class="detail-close">&times;</button>
+      </div>
+      <div class="detail-body" id="detail-body"></div>
+    </div>
+  </main>
+
+  <script src="admin.js"></script>
+</body>
+</html>

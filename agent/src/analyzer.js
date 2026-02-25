@@ -1,0 +1,500 @@
+import config from '../config.js';
+
+export class Analyzer {
+  constructor(browserManager) {
+    this.browserManager = browserManager;
+    this.activeAnalyses = new Map();
+    this.screenshotIntervals = new Map();
+  }
+
+  async startAnalysis(analysisId, url, sendEvent) {
+    console.log(`[analyzer] Starting analysis ${analysisId} for ${url}`);
+
+    const page = await this.browserManager.getPage(analysisId);
+    const networkRequests = [];
+    const scripts = [];
+    const consoleLogs = [];
+    const redirectChain = [];
+
+    let originalHost;
+    try {
+      originalHost = new URL(url).hostname;
+    } catch {
+      console.error(`[analyzer] Invalid URL: ${url}`);
+      sendEvent({ type: 'error', analysis_id: analysisId, message: `Invalid URL: ${url}` });
+      return;
+    }
+
+    const clipboardReads = [];
+    const state = {
+      aborted: false,
+      sendEvent,
+      url,
+      originalHost,
+      networkRequests,
+      scripts,
+      consoleLogs,
+      redirectChain,
+      clipboardReads,
+    };
+
+    const requestHandler = (request) => {
+      if (state.aborted) return;
+      const reqUrl = request.url();
+      let isThirdParty = false;
+      try { isThirdParty = new URL(reqUrl).hostname !== originalHost; } catch {}
+
+      networkRequests.push({
+        url: reqUrl,
+        method: request.method(),
+        status: null,
+        content_type: null,
+        size: null,
+        remote_ip: null,
+        is_third_party: isThirdParty,
+        timestamp: Date.now(),
+      });
+    };
+
+    const responseHandler = async (response) => {
+      if (state.aborted) return;
+      const reqUrl = response.url();
+      const status = response.status();
+
+      if (status >= 300 && status < 400) {
+        const location = response.headers()['location'];
+        if (location) {
+          console.log(`[analyzer] Redirect: ${reqUrl} -> ${location} (${status})`);
+          redirectChain.push({ from: reqUrl, to: location, status });
+          sendEvent({
+            type: 'redirect_detected',
+            analysis_id: analysisId,
+            from: reqUrl,
+            to: location,
+            status,
+          });
+        }
+      }
+
+      const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
+      if (existing) {
+        existing.status = status;
+        existing.content_type = response.headers()['content-type'] || null;
+
+        const remote = response.remoteAddress();
+        existing.remote_ip = remote?.ip || null;
+
+        sendEvent({
+          type: 'network_request_captured',
+          analysis_id: analysisId,
+          request: { ...existing },
+        });
+
+        const ct = existing.content_type || '';
+        const isText = ct.includes('text/') || ct.includes('javascript') || ct.includes('json') ||
+                        ct.includes('xml') || ct.includes('css') || ct.includes('html') ||
+                        reqUrl.endsWith('.js') || reqUrl.endsWith('.css') || reqUrl.endsWith('.html') ||
+                        reqUrl.endsWith('.json') || reqUrl.endsWith('.xml') || reqUrl.endsWith('.svg');
+
+        if (isText && status >= 200 && status < 400) {
+          let body = null;
+          try {
+            body = await response.text();
+          } catch {}
+          if (body !== null) {
+            sendEvent({
+              type: 'raw_file_captured',
+              analysis_id: analysisId,
+              file: { url: reqUrl, content_type: ct.split(';')[0].trim(), size: body.length, content: body, timestamp: Date.now() },
+            });
+          }
+
+          if (ct.includes('javascript') || reqUrl.endsWith('.js')) {
+            const script = {
+              url: reqUrl,
+              is_inline: false,
+              size: body ? body.length : (parseInt(response.headers()['content-length']) || null),
+              hash: null,
+              content: body,
+              timestamp: Date.now(),
+            };
+            scripts.push(script);
+            sendEvent({ type: 'script_loaded', analysis_id: analysisId, script });
+          }
+        }
+      }
+    };
+
+    const consoleHandler = (msg) => {
+      if (state.aborted) return;
+      const log = { level: msg.type(), text: msg.text(), timestamp: Date.now() };
+      consoleLogs.push(log);
+      sendEvent({ type: 'console_log_captured', analysis_id: analysisId, log });
+    };
+
+    page.on('request', requestHandler);
+    page.on('response', responseHandler);
+    page.on('console', consoleHandler);
+
+    state.requestHandler = requestHandler;
+    state.responseHandler = responseHandler;
+    state.consoleHandler = consoleHandler;
+    this.activeAnalyses.set(analysisId, state);
+
+    await this.browserManager.installClipboardHooks(analysisId);
+
+    let screenshotTick = 0;
+    const screenshotInterval = setInterval(async () => {
+      if (state.aborted) return;
+      try {
+        const screenshot = await this.browserManager.takeScreenshot(analysisId);
+        if (screenshot) {
+          sendEvent({ type: 'screenshot', analysis_id: analysisId, ...screenshot });
+        }
+      } catch (err) {
+        console.error(`[analyzer] Screenshot interval error: ${err.message}`);
+      }
+      screenshotTick++;
+      if (screenshotTick % 4 === 0) {
+        this._drainAndReportClipboard(analysisId, 'poll');
+      }
+    }, 500);
+    this.screenshotIntervals.set(analysisId, screenshotInterval);
+
+    try {
+      await this._navigateWithRetries(page, url, state);
+
+      if (state.aborted) return;
+
+      const title = await page.title();
+      const finalUrl = page.url();
+
+      console.log(`[analyzer] Navigation complete: url=${finalUrl} title="${title}"`);
+      sendEvent({
+        type: 'navigation_complete',
+        analysis_id: analysisId,
+        url: finalUrl,
+        title,
+      });
+
+      // Capture the rendered page HTML source
+      try {
+        const html = await page.content();
+        if (html) {
+          sendEvent({
+            type: 'page_source_captured',
+            analysis_id: analysisId,
+            html,
+          });
+          console.log(`[analyzer] Page source captured (${html.length} chars)`);
+        }
+      } catch (err) {
+        console.warn(`[analyzer] Page source capture error: ${err.message}`);
+      }
+
+      this._drainAndReportClipboard(analysisId, 'navigation');
+
+      try {
+        const now = Date.now();
+        const inlineScripts = await page.evaluate(() => {
+          return Array.from(document.querySelectorAll('script:not([src])')).map((s, i) => ({
+            url: null,
+            is_inline: true,
+            size: s.textContent.length,
+            hash: null,
+            content: s.textContent || null,
+            index: i,
+          }));
+        });
+        inlineScripts.forEach(s => { s.timestamp = now; });
+        for (const s of inlineScripts) {
+          scripts.push(s);
+          sendEvent({ type: 'script_loaded', analysis_id: analysisId, script: s });
+        }
+        if (inlineScripts.length > 0) {
+          console.log(`[analyzer] Found ${inlineScripts.length} inline scripts`);
+        }
+      } catch (err) {
+        console.warn(`[analyzer] Inline script scan error: ${err.message}`);
+      }
+
+      console.log(`[analyzer] Analysis ${analysisId} is now live — waiting for user to finish`);
+    } catch (err) {
+      if (state.aborted) return;
+      console.error(`[analyzer] Navigation error for ${analysisId}: ${err.message}`);
+      sendEvent({ type: 'error', analysis_id: analysisId, message: err.message });
+      this.cleanupAnalysis(analysisId);
+    }
+  }
+
+  async _navigateWithRetries(page, url, state) {
+    const timeout = config.navigation.timeout;
+    const chain = config.navigation.waitUntilChain;
+
+    for (const strategy of chain) {
+      if (state.aborted) return;
+      try {
+        console.log(`[analyzer] Navigating to ${url} (timeout: ${timeout}ms, waitUntil: ${strategy})...`);
+        await page.goto(url, { waitUntil: strategy, timeout });
+        return;
+      } catch (err) {
+        if (state.aborted) return;
+        console.warn(`[analyzer] ${strategy} failed: ${err.message}`);
+      }
+    }
+
+    // All page.goto strategies failed — fall back to CDP Page.navigate
+    // which does not throw ERR_BLOCKED_BY_CLIENT.
+    if (state.aborted) return;
+    console.log(`[analyzer] All goto strategies failed, using CDP Page.navigate for ${url}...`);
+    const cdp = await page.createCDPSession();
+    try {
+      await cdp.send('Page.navigate', { url });
+      await new Promise((r) => setTimeout(r, 3000));
+
+      const currentUrl = page.url();
+      if (!currentUrl || currentUrl === 'about:blank' || currentUrl.startsWith('chrome-error://')) {
+        throw new Error(`CDP navigation ended on ${currentUrl || 'blank'}`);
+      }
+      console.log(`[analyzer] CDP navigation landed on ${currentUrl}`);
+    } finally {
+      await cdp.detach();
+    }
+  }
+
+  async analyzeSecurityIndicators(page, originalUrl) {
+    const security = {
+      ssl_valid: null,
+      ssl_issuer: null,
+      ssl_protocol: null,
+      has_mixed_content: false,
+      suspicious_patterns: [],
+    };
+
+    try {
+      security.ssl_valid = page.url().startsWith('https://');
+
+      const pageAnalysis = await page.evaluate(() => {
+        const html = document.documentElement.outerHTML;
+        const patterns = [];
+
+        if (html.includes('eval(') && html.includes('unescape('))
+          patterns.push('Obfuscated JavaScript (eval + unescape)');
+        if (html.includes('document.write(unescape('))
+          patterns.push('document.write with unescape');
+        if ((html.match(/iframe/gi) || []).length > 5)
+          patterns.push('Excessive iframes');
+        if (html.includes('display:none') && html.includes('<form'))
+          patterns.push('Hidden forms detected');
+        if (html.includes('window.location') && html.includes('setTimeout'))
+          patterns.push('Delayed redirect detected');
+
+        const mixedContent = document.querySelectorAll(
+          'img[src^="http:"], script[src^="http:"], link[href^="http:"], iframe[src^="http:"]'
+        );
+
+        const forms = document.querySelectorAll('form[action]');
+        forms.forEach((f) => {
+          const action = f.getAttribute('action');
+          if (action && !action.startsWith('/') && !action.startsWith(window.location.origin)) {
+            patterns.push(`Cross-origin form submission: ${action}`);
+          }
+        });
+
+        return { mixedContentCount: mixedContent.length, patterns };
+      });
+
+      security.has_mixed_content = pageAnalysis.mixedContentCount > 0;
+      security.suspicious_patterns = pageAnalysis.patterns;
+      console.log(`[analyzer] Security: ssl=${security.ssl_valid}, mixed_content=${security.has_mixed_content}, patterns=${security.suspicious_patterns.length}`);
+    } catch (err) {
+      console.error('[analyzer] Security analysis error:', err.message);
+    }
+
+    return security;
+  }
+
+  computeRisk(networkRequests, scripts, redirectChain, security, clipboardReads = []) {
+    let riskScore = 0;
+    const riskFactors = [];
+
+    if (redirectChain.length > 2) {
+      riskScore += 20;
+      riskFactors.push(`Multiple redirects (${redirectChain.length})`);
+    }
+
+    const thirdParty = networkRequests.filter((r) => r.is_third_party);
+    if (thirdParty.length > 20) {
+      riskScore += 15;
+      riskFactors.push(`High third-party requests (${thirdParty.length})`);
+    }
+
+    if (!security.ssl_valid) {
+      riskScore += 25;
+      riskFactors.push('No HTTPS');
+    }
+
+    if (security.has_mixed_content) {
+      riskScore += 10;
+      riskFactors.push('Mixed content detected');
+    }
+
+    for (const pattern of security.suspicious_patterns) {
+      riskScore += 15;
+      riskFactors.push(pattern);
+    }
+
+    const inlineScripts = scripts.filter((s) => s.is_inline);
+    if (inlineScripts.length > 10) {
+      riskScore += 10;
+      riskFactors.push(`Excessive inline scripts (${inlineScripts.length})`);
+    }
+
+    const nonEmptyClipboard = clipboardReads.filter(r => r.content && r.content.length > 0);
+    if (nonEmptyClipboard.length > 0) {
+      riskScore += 30;
+      riskFactors.push(`Clipboard hijack detected (${nonEmptyClipboard.length} write(s) intercepted)`);
+    }
+
+    return { riskScore: Math.min(riskScore, 100), riskFactors };
+  }
+
+  cleanupAnalysis(analysisId) {
+    const state = this.activeAnalyses.get(analysisId);
+    if (state) {
+      state.aborted = true;
+      try {
+        const session = this.browserManager.getSession(analysisId);
+        if (session?.page && !session.page.isClosed()) {
+          session.page.off('request', state.requestHandler);
+          session.page.off('response', state.responseHandler);
+          session.page.off('console', state.consoleHandler);
+        }
+      } catch (err) {
+        console.warn(`[analyzer] Cleanup listener removal error: ${err.message}`);
+      }
+      this.activeAnalyses.delete(analysisId);
+    }
+
+    const interval = this.screenshotIntervals.get(analysisId);
+    if (interval) {
+      clearInterval(interval);
+      this.screenshotIntervals.delete(analysisId);
+    }
+  }
+
+  async stopAnalysis(analysisId) {
+    console.log(`[analyzer] Stopping analysis ${analysisId}`);
+    const state = this.activeAnalyses.get(analysisId);
+    if (!state || state.aborted) return;
+
+    const sendEvent = state.sendEvent;
+
+    // Drain intercepted clipboard writes before cleanup removes the state
+    try {
+      const captures = await this.browserManager.drainClipboardCaptures(analysisId);
+      for (const cap of captures) {
+        if (!cap.content) continue;
+        const read = {
+          content: cap.content,
+          timestamp: cap.timestamp || Date.now(),
+          trigger: `stop (${cap.method})`,
+        };
+        state.clipboardReads.push(read);
+        sendEvent({ type: 'clipboard_captured', analysis_id: analysisId, read });
+        console.log(`[analyzer] Clipboard write intercepted [${cap.method}] at stop: ${cap.content.length} chars`);
+      }
+    } catch (err) {
+      console.warn(`[analyzer] Clipboard drain at stop: ${err.message}`);
+    }
+
+    this.cleanupAnalysis(analysisId);
+
+    let finalUrl = null;
+    let title = null;
+    let security = { ssl_valid: null, ssl_issuer: null, ssl_protocol: null, has_mixed_content: false, suspicious_patterns: [] };
+    try {
+      const page = await this.browserManager.getPage(analysisId);
+      finalUrl = page.url();
+      title = await page.title();
+
+      const stopNow = Date.now();
+      const currentInline = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('script:not([src])')).map((s) => ({
+          url: null,
+          is_inline: true,
+          size: s.textContent.length,
+          hash: null,
+          content: s.textContent || null,
+        }));
+      });
+      currentInline.forEach(s => { s.timestamp = stopNow; });
+
+      const existingInlineCount = state.scripts.filter(s => s.is_inline).length;
+      const newInline = currentInline.slice(existingInlineCount);
+      if (newInline.length > 0) {
+        console.log(`[analyzer] Found ${newInline.length} new inline scripts since navigation`);
+        state.scripts.push(...newInline);
+      }
+
+      security = await this.analyzeSecurityIndicators(page, state.url);
+    } catch (err) {
+      console.warn(`[analyzer] Report data collection error: ${err.message}`);
+    }
+
+    const allScripts = state.scripts;
+
+    const { riskScore, riskFactors } = this.computeRisk(
+      state.networkRequests, allScripts, state.redirectChain, security, state.clipboardReads
+    );
+
+    console.log(`[analyzer] Report for ${analysisId}: risk=${riskScore}/100, ${state.networkRequests.length} requests, ${allScripts.length} scripts`);
+    sendEvent({
+      type: 'analysis_complete',
+      analysis_id: analysisId,
+      report: {
+        final_url: finalUrl,
+        page_title: title,
+        redirect_chain: state.redirectChain,
+        network_requests: state.networkRequests,
+        scripts: allScripts,
+        console_logs: state.consoleLogs,
+        clipboard_reads: state.clipboardReads,
+        security,
+        risk_score: riskScore,
+        risk_factors: riskFactors,
+      },
+    });
+  }
+
+  /**
+   * Drain intercepted clipboard writes and send them as events.
+   */
+  async _drainAndReportClipboard(analysisId, trigger = 'poll') {
+    const state = this.activeAnalyses.get(analysisId);
+    if (!state?.sendEvent) return;
+    try {
+      const captures = await this.browserManager.drainClipboardCaptures(analysisId);
+      for (const cap of captures) {
+        if (!cap.content) continue;
+        const read = {
+          content: cap.content,
+          timestamp: cap.timestamp || Date.now(),
+          trigger: `${trigger} (${cap.method})`,
+        };
+        state.clipboardReads.push(read);
+        state.sendEvent({ type: 'clipboard_captured', analysis_id: analysisId, read });
+        console.log(`[analyzer] Clipboard write intercepted [${cap.method}] after ${trigger}: ${cap.content.length} chars`);
+      }
+    } catch (err) {
+      console.warn(`[analyzer] Clipboard drain (${trigger}): ${err.message}`);
+    }
+  }
+
+  /**
+   * Drain clipboard after user interaction (click, keypress, etc.).
+   */
+  async reportClipboard(analysisId, trigger = 'click') {
+    await this._drainAndReportClipboard(analysisId, trigger);
+  }
+}
