@@ -1,3 +1,5 @@
+//! Shared application state: analyses store, agent command channel, viewer channels.
+
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
@@ -7,6 +9,8 @@ use tokio::sync::broadcast;
 use crate::models::Analysis;
 use crate::protocol::AgentCommand;
 
+/// Global state shared by REST handlers and WebSocket handlers.
+/// Analyses are keyed by UUID; viewer_channels are created on demand per analysis.
 #[derive(Clone)]
 pub struct AppState {
     pub analyses: Arc<DashMap<String, Analysis>>,
@@ -16,6 +20,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Create new state: empty analyses map, broadcast channel for agent commands, no viewers.
     pub fn new() -> Self {
         let (agent_cmd_tx, _) = broadcast::channel(1024);
         Self {
@@ -26,6 +31,8 @@ impl AppState {
         }
     }
 
+    /// Get or create the broadcast sender for viewers watching this analysis.
+    /// Each viewer subscribes to this channel to receive forwarded agent events.
     pub fn get_viewer_tx(&self, analysis_id: &str) -> broadcast::Sender<String> {
         self.viewer_channels
             .entry(analysis_id.to_string())

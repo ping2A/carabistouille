@@ -1,3 +1,7 @@
+/**
+ * Agent entry point: WebSocket client to the server, command dispatcher, and event sender.
+ * Connects to /ws/agent, receives navigate/click/scroll/stop etc., drives BrowserManager + Analyzer.
+ */
 import WebSocket from 'ws';
 import { BrowserManager } from './browser.js';
 import { Analyzer } from './analyzer.js';
@@ -5,6 +9,7 @@ import config from '../config.js';
 
 const SERVER_URL = config.server.url;
 
+/** Agent: holds WS connection, BrowserManager (one Chromium per analysis), and Analyzer (capture + risk). */
 class Agent {
   constructor() {
     this.ws = null;
@@ -14,6 +19,7 @@ class Agent {
     this.sendCount = 0;
   }
 
+  /** Connect to server WebSocket; on open send agent_ready; on close schedule reconnect with backoff. */
   connect() {
     console.log(`[agent] Connecting to server at ${SERVER_URL}...`);
     const wsOptions = {};
@@ -49,6 +55,7 @@ class Agent {
     });
   }
 
+  /** Send a JSON-serialized event to the server (screenshot, network_request_captured, etc.). */
   send(event) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       const json = JSON.stringify(event);
@@ -64,6 +71,7 @@ class Agent {
     }
   }
 
+  /** Dispatch a command from the server: navigate, click, scroll, stop_analysis, etc. */
   async handleCommand(command) {
     const type = command.type;
     const aid = command.analysis_id;
@@ -130,6 +138,7 @@ class Agent {
     }
   }
 
+  /** Take a screenshot for the analysis and send it as a screenshot event. */
   async sendScreenshot(analysisId) {
     const screenshot = await this.browserManager.takeScreenshot(analysisId);
     if (screenshot) {

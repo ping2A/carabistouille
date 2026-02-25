@@ -1,8 +1,14 @@
+//! WebSocket protocol: commands sent to the agent, events sent from the agent.
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::models::{AnalysisReport, ClipboardRead, ConsoleLog, NetworkRequest, RawFile, ScriptInfo};
+use crate::models::{
+    AnalysisReport, ClipboardRead, ConsoleLog, HttpHeader, NetworkRequest, RawFile, ScriptInfo,
+    StorageCapture,
+};
 
+/// Commands the server sends to the Puppeteer agent over the agent WebSocket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentCommand {
@@ -17,6 +23,7 @@ pub enum AgentCommand {
     StopAnalysis { analysis_id: String },
 }
 
+/// Events the agent sends to the server (screenshots, network, console, scripts, report, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -74,6 +81,18 @@ pub enum AgentEvent {
         analysis_id: String,
         read: ClipboardRead,
     },
+    StorageCaptured {
+        analysis_id: String,
+        capture: StorageCapture,
+    },
+    SecurityHeadersCaptured {
+        analysis_id: String,
+        headers: Vec<HttpHeader>,
+    },
+    DomSnapshotCaptured {
+        analysis_id: String,
+        html: String,
+    },
     Error {
         analysis_id: String,
         message: String,
@@ -82,6 +101,7 @@ pub enum AgentEvent {
 }
 
 impl AgentCommand {
+    /// Serialization-friendly command name (e.g. "navigate", "click") for logging.
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Navigate { .. } => "navigate",
@@ -97,6 +117,7 @@ impl AgentCommand {
 }
 
 impl AgentEvent {
+    /// Serialization-friendly event name (e.g. "screenshot", "analysis_complete") for logging.
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Screenshot { .. } => "screenshot",
@@ -110,12 +131,16 @@ impl AgentEvent {
             Self::RawFileCaptured { .. } => "raw_file_captured",
             Self::PageSourceCaptured { .. } => "page_source_captured",
             Self::ClipboardCaptured { .. } => "clipboard_captured",
+            Self::StorageCaptured { .. } => "storage_captured",
+            Self::SecurityHeadersCaptured { .. } => "security_headers_captured",
+            Self::DomSnapshotCaptured { .. } => "dom_snapshot_captured",
             Self::Error { .. } => "error",
             Self::AgentReady => "agent_ready",
         }
     }
 }
 
+/// Bounding box for an element (used by inspect_element response).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementRect {
     pub x: f64,

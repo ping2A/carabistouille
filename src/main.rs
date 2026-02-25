@@ -1,36 +1,9 @@
-mod api;
-mod models;
-mod protocol;
-mod state;
+//! Server entry point: TLS resolution, router, and HTTP/HTTPS listen loop.
 
 use std::net::SocketAddr;
 
-use axum::{
-    routing::{delete, get, post},
-    Router,
-};
-use state::AppState;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use carabistouille::{build_router, AppState};
 use tracing_subscriber::EnvFilter;
-
-fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/api/status", get(api::routes::get_status))
-        .route("/api/analyses", post(api::routes::create_analysis))
-        .route("/api/analyses", get(api::routes::list_analyses))
-        .route("/api/analyses/:id", get(api::routes::get_analysis))
-        .route("/api/analyses/:id/stop", post(api::routes::stop_analysis))
-        .route(
-            "/api/analyses/:id/screenshots",
-            get(api::routes::get_screenshots),
-        )
-        .route("/api/analyses/:id", delete(api::routes::delete_analysis))
-        .route("/ws/agent", get(api::ws::agent_ws_handler))
-        .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler))
-        .fallback_service(ServeDir::new("web"))
-        .layer(CorsLayer::permissive())
-        .with_state(state)
-}
 
 /// Resolve TLS configuration from environment variables.
 ///
@@ -77,6 +50,7 @@ async fn resolve_tls_config() -> Option<axum_server::tls_rustls::RustlsConfig> {
     None
 }
 
+/// Initialize logging, build router, bind with or without TLS, and run the server.
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()

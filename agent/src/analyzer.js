@@ -1,5 +1,10 @@
+/**
+ * Analyzer: orchestrates a single analysis — request/response/console listeners, navigation,
+ * inline scripts, page source, clipboard drain, screenshots; builds report and risk score on stop.
+ */
 import config from '../config.js';
 
+/** Holds per-analysis state (requests, scripts, console, redirects, clipboard), runs capture and report. */
 export class Analyzer {
   constructor(browserManager) {
     this.browserManager = browserManager;
@@ -7,6 +12,7 @@ export class Analyzer {
     this.screenshotIntervals = new Map();
   }
 
+  /** Set up request/response/console listeners, navigate to url, capture inline scripts and page source; keep analysis live until stop. */
   async startAnalysis(analysisId, url, sendEvent) {
     console.log(`[analyzer] Starting analysis ${analysisId} for ${url}`);
 
@@ -26,6 +32,8 @@ export class Analyzer {
     }
 
     const clipboardReads = [];
+    /** Last response headers per URL for document responses (used for CSP / security headers at stop). */
+    const lastDocumentHeadersByUrl = {};
     const state = {
       aborted: false,
       sendEvent,
@@ -36,6 +44,7 @@ export class Analyzer {
       consoleLogs,
       redirectChain,
       clipboardReads,
+      lastDocumentHeadersByUrl,
     };
 
     const requestHandler = (request) => {
@@ -60,6 +69,15 @@ export class Analyzer {
       if (state.aborted) return;
       const reqUrl = response.url();
       const status = response.status();
+      const request = response.request();
+      if (request.resourceType() === 'document') {
+        try {
+          const headers = response.headers();
+          state.lastDocumentHeadersByUrl[reqUrl] = typeof headers === 'object' && headers !== null
+            ? { ...headers }
+            : {};
+        } catch {}
+      }
 
       if (status >= 300 && status < 400) {
         const location = response.headers()['location'];
@@ -227,6 +245,7 @@ export class Analyzer {
     }
   }
 
+  /** Try each waitUntil strategy in order; if all fail, use CDP Page.navigate as fallback. */
   async _navigateWithRetries(page, url, state) {
     const timeout = config.navigation.timeout;
     const chain = config.navigation.waitUntilChain;
@@ -262,6 +281,7 @@ export class Analyzer {
     }
   }
 
+  /** Check HTTPS, mixed content, suspicious patterns (eval+unescape, iframes, hidden forms, etc.). */
   async analyzeSecurityIndicators(page, originalUrl) {
     const security = {
       ssl_valid: null,
@@ -314,6 +334,7 @@ export class Analyzer {
     return security;
   }
 
+  /** Compute risk score 0–100 and list of risk factors from redirects, third-party, HTTPS, mixed content, patterns, clipboard. */
   computeRisk(networkRequests, scripts, redirectChain, security, clipboardReads = []) {
     let riskScore = 0;
     const riskFactors = [];
@@ -359,6 +380,7 @@ export class Analyzer {
     return { riskScore: Math.min(riskScore, 100), riskFactors };
   }
 
+  /** Remove request/response/console listeners and screenshot interval for this analysis. */
   cleanupAnalysis(analysisId) {
     const state = this.activeAnalyses.get(analysisId);
     if (state) {
@@ -383,6 +405,7 @@ export class Analyzer {
     }
   }
 
+  /** Drain clipboard, cleanup, collect final URL/title/inline scripts/security, compute risk, send analysis_complete. */
   async stopAnalysis(analysisId) {
     console.log(`[analyzer] Stopping analysis ${analysisId}`);
     const state = this.activeAnalyses.get(analysisId);
@@ -417,6 +440,55 @@ export class Analyzer {
       const page = await this.browserManager.getPage(analysisId);
       finalUrl = page.url();
       title = await page.title();
+
+      // Cookie / storage inspection (main frame)
+      try {
+        const cookies = await page.cookies();
+        const storage = await page.evaluate(() => ({
+          local: Object.entries(localStorage || {}).map(([key, value]) => ({ key, value })),
+          session: Object.entries(sessionStorage || {}).map(([key, value]) => ({ key, value })),
+        }));
+        const cookieList = (cookies || []).map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain || null,
+          path: c.path || null,
+          http_only: c.httpOnly ?? null,
+          secure: c.secure ?? null,
+          same_site: c.sameSite || null,
+        }));
+        sendEvent({
+          type: 'storage_captured',
+          analysis_id: analysisId,
+          capture: {
+            cookies: cookieList,
+            local_storage: storage?.local || [],
+            session_storage: storage?.session || [],
+          },
+        });
+        console.log(`[analyzer] Storage: ${cookieList.length} cookies, ${(storage?.local || []).length} localStorage, ${(storage?.session || []).length} sessionStorage`);
+      } catch (err) {
+        console.warn(`[analyzer] Storage capture error: ${err.message}`);
+      }
+
+      // Security headers (last document response for final URL)
+      const docHeaders = state.lastDocumentHeadersByUrl[finalUrl];
+      if (docHeaders && typeof docHeaders === 'object') {
+        const headers = Object.entries(docHeaders).map(([name, value]) => ({ name, value: String(value) }));
+        sendEvent({ type: 'security_headers_captured', analysis_id: analysisId, headers });
+        console.log(`[analyzer] Security headers: ${headers.length} headers`);
+      }
+
+      // DOM snapshot at finish time
+      try {
+        const html = await page.content();
+        if (html) {
+          sendEvent({ type: 'dom_snapshot_captured', analysis_id: analysisId, html });
+          console.log(`[analyzer] DOM snapshot: ${html.length} chars`);
+        }
+      } catch (err) {
+        console.warn(`[analyzer] DOM snapshot error: ${err.message}`);
+      }
 
       const stopNow = Date.now();
       const currentInline = await page.evaluate(() => {
@@ -467,9 +539,7 @@ export class Analyzer {
     });
   }
 
-  /**
-   * Drain intercepted clipboard writes and send them as events.
-   */
+  /** Drain clipboard captures from the page, push to state.clipboardReads, send clipboard_captured events. */
   async _drainAndReportClipboard(analysisId, trigger = 'poll') {
     const state = this.activeAnalyses.get(analysisId);
     if (!state?.sendEvent) return;
@@ -491,9 +561,7 @@ export class Analyzer {
     }
   }
 
-  /**
-   * Drain clipboard after user interaction (click, keypress, etc.).
-   */
+  /** Convenience: drain and report clipboard for a given trigger (e.g. 'click', 'keypress'). */
   async reportClipboard(analysisId, trigger = 'click') {
     await this._drainAndReportClipboard(analysisId, trigger);
   }

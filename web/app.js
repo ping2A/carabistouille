@@ -1,3 +1,7 @@
+/**
+ * Main dashboard UI: URL submit, analysis list, viewer WebSocket, viewport interaction,
+ * report panels (Network, Scripts, Console, Raw, Screenshots, Security), risk badge.
+ */
 class App {
   constructor() {
     this.currentAnalysisId = null;
@@ -12,6 +16,11 @@ class App {
     this.rawFiles = [];
     this.clipboardReads = [];
     this.pageSource = null;
+    this.domSnapshot = null;
+    this.storageCapture = null;
+    this.securityHeaders = [];
+    this.redirectChain = [];
+    this.finalUrl = null;
     this.screenshotTimeline = [];
     this.screenshotTimelineCount = 0;
     this.lastMouseMoveTime = 0;
@@ -27,6 +36,7 @@ class App {
     console.log('[ui] App initialized');
   }
 
+  /** Cache DOM references for form, viewport, panels, buttons. */
   initElements() {
     this.urlForm = document.getElementById('url-form');
     this.urlInput = document.getElementById('url-input');
@@ -48,6 +58,7 @@ class App {
     this.riskScoreEl = document.getElementById('risk-score');
   }
 
+  /** Form submit, tool buttons, stop, proxy toggle, tab clicks, search inputs, viewport click/scroll/mousemove, keyboard, resizer. */
   initEventListeners() {
     this.urlForm.addEventListener('submit', (e) => {
       e.preventDefault();
@@ -143,6 +154,7 @@ class App {
     });
   }
 
+  /** Map mouse event to viewport image coordinates (accounting for scale). */
   getViewportCoords(e) {
     const rect = this.viewportImg.getBoundingClientRect();
     const scaleX = this.viewportImg.naturalWidth / rect.width;
@@ -153,6 +165,7 @@ class App {
     };
   }
 
+  /** Send click or inspect command to agent depending on active tool. */
   handleViewportClick(e) {
     if (!this.ws) return;
     const { x, y } = this.getViewportCoords(e);
@@ -165,12 +178,14 @@ class App {
     }
   }
 
+  /** Send scroll (delta_x, delta_y) to agent. */
   handleViewportScroll(e) {
     if (!this.ws) return;
     e.preventDefault();
     this.wsSend({ type: 'scroll', delta_x: e.deltaX, delta_y: e.deltaY });
   }
 
+  /** Throttled mousemove: send coordinates to agent for hover effects. */
   handleViewportMouseMove(e) {
     if (!this.ws || this.activeTool !== 'interact') return;
 
@@ -182,6 +197,7 @@ class App {
     this.wsSend({ type: 'mousemove', x, y });
   }
 
+  /** POST /api/analyses with url (and optional proxy), then select the new analysis and connect viewer WS. */
   async submitUrl() {
     const url = this.urlInput.value.trim();
     if (!url) return;
@@ -219,6 +235,7 @@ class App {
     }
   }
 
+  /** POST /api/analyses/:id/stop to request analysis finish. */
   async stopAnalysis() {
     if (!this.currentAnalysisId) return;
 
@@ -235,6 +252,7 @@ class App {
     }
   }
 
+  /** Fetch GET /api/analyses and render the sidebar list; update selected item. */
   async loadAnalyses() {
     try {
       const res = await fetch('/api/analyses');
@@ -268,6 +286,7 @@ class App {
     });
   }
 
+  /** Switch current analysis: close viewer WS, reset panels, load report from API, connect viewer WS. */
   selectAnalysis(id) {
     console.log(`[ui] Selecting analysis: ${id}`);
     if (this.ws) {
@@ -285,6 +304,7 @@ class App {
     this.connectViewer(id);
   }
 
+  /** Show/hide Finish button based on status (pending | running vs complete | error). */
   updateStopButton(status) {
     this.currentStatus = status;
     const active = status === 'pending' || status === 'running';
@@ -292,6 +312,7 @@ class App {
     this.stopBtn.disabled = false;
   }
 
+  /** Clear in-memory report data and re-render all panels; hide viewport image and stop button. */
   resetReportPanels() {
     this.networkRequests = [];
     this.scripts = [];
@@ -303,6 +324,11 @@ class App {
     this.rawFiles = [];
     this.clipboardReads = [];
     this.pageSource = null;
+    this.domSnapshot = null;
+    this.storageCapture = null;
+    this.securityHeaders = [];
+    this.redirectChain = [];
+    this.finalUrl = null;
     this.screenshotTimeline = [];
     this.screenshotTimelineCount = 0;
     document.getElementById('search-network').value = '';
@@ -324,6 +350,7 @@ class App {
     this.viewportPlaceholder.style.display = 'flex';
   }
 
+  /** Fetch GET /api/analyses/:id and populate report panels and viewport screenshot for completed analyses. */
   async loadAnalysisReport(id) {
     try {
       const res = await fetch(`/api/analyses/${id}`);
@@ -358,6 +385,11 @@ class App {
         this.clipboardReads = r.clipboard_reads || [];
         this.rawFiles = r.raw_files || [];
         this.pageSource = r.page_source || null;
+        this.domSnapshot = r.dom_snapshot || null;
+        this.storageCapture = r.storage_capture || null;
+        this.securityHeaders = r.security_headers || [];
+        this.redirectChain = r.redirect_chain || [];
+        this.finalUrl = r.final_url || null;
 
         const allTimestamps = [
           ...this.networkRequests.map(r => r.timestamp),
@@ -384,6 +416,7 @@ class App {
     }
   }
 
+  /** Open WebSocket to /ws/viewer/:id; on message dispatch to handleViewerEvent. */
   connectViewer(analysisId) {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/viewer/${analysisId}`;
@@ -424,6 +457,7 @@ class App {
     };
   }
 
+  /** Dispatch incoming viewer events: screenshot, network_request_captured, report_snapshot, analysis_complete, etc. */
   handleViewerEvent(event) {
     switch (event.type) {
       case 'screenshot':
@@ -467,6 +501,21 @@ class App {
         this.renderRawPanel();
         break;
 
+      case 'storage_captured':
+        this.storageCapture = event.capture;
+        this.renderSecurityPanel();
+        break;
+
+      case 'security_headers_captured':
+        this.securityHeaders = event.headers || [];
+        this.renderSecurityPanel();
+        break;
+
+      case 'dom_snapshot_captured':
+        this.domSnapshot = event.html;
+        this.renderRawPanel();
+        break;
+
       case 'clipboard_captured':
         this.clipboardReads.push(event.read);
         this.renderSecurityPanel();
@@ -491,6 +540,11 @@ class App {
           if (r.clipboard_reads?.length) this.clipboardReads = r.clipboard_reads;
           if (r.raw_files?.length > this.rawFiles.length) this.rawFiles = r.raw_files;
           if (r.page_source) this.pageSource = r.page_source;
+          if (r.dom_snapshot) this.domSnapshot = r.dom_snapshot;
+          if (r.storage_capture) this.storageCapture = r.storage_capture;
+          if (r.security_headers?.length) this.securityHeaders = r.security_headers;
+          if (r.redirect_chain?.length) this.redirectChain = r.redirect_chain;
+          if (r.final_url) this.finalUrl = r.final_url;
 
           const allTimestamps = [
             ...this.networkRequests.map(x => x.timestamp),
@@ -513,11 +567,14 @@ class App {
 
       case 'redirect_detected':
         console.log(`[ui] Redirect: ${event.from} -> ${event.to}`);
+        this.redirectChain.push({ from: event.from, to: event.to, status: event.status });
+        this.renderSecurityPanel();
         break;
 
       case 'navigation_complete':
         console.log(`[ui] Navigation complete: ${event.url} "${event.title}"`);
         this.pageUrl.textContent = event.url;
+        this.finalUrl = event.url;
         if (event.title) {
           document.title = `${event.title} — Carabistouille`;
         }
@@ -535,6 +592,11 @@ class App {
           this.clipboardReads = event.report.clipboard_reads || this.clipboardReads;
           if (event.report.raw_files?.length) this.rawFiles = event.report.raw_files;
           if (event.report.page_source) this.pageSource = event.report.page_source;
+          if (event.report.dom_snapshot) this.domSnapshot = event.report.dom_snapshot;
+          if (event.report.storage_capture) this.storageCapture = event.report.storage_capture;
+          if (event.report.security_headers?.length) this.securityHeaders = event.report.security_headers;
+          if (event.report.redirect_chain?.length) this.redirectChain = event.report.redirect_chain;
+          if (event.report.final_url) this.finalUrl = event.report.final_url;
           this.security = event.report.security || null;
           this.riskScore = event.report.risk_score;
           this.riskFactors = event.report.risk_factors || [];
@@ -565,6 +627,7 @@ class App {
     }
   }
 
+  /** Display inspected element: highlight rect and show tag/attributes in inspector panel. */
   showElementInfo(info) {
     const imgRect = this.viewportImg.getBoundingClientRect();
     const scaleX = imgRect.width / this.viewportImg.naturalWidth;
@@ -592,6 +655,7 @@ class App {
     `;
   }
 
+  /** Set risk score text and color class (low/medium/high) on the report header badge. */
   updateRiskBadge() {
     if (this.riskScore === null || this.riskScore === undefined) return;
 
@@ -604,6 +668,7 @@ class App {
     else this.riskBadge.classList.add('high');
   }
 
+  /** Render Network tab: filtered list of requests with status, method, URL, copy/JS buttons. */
   renderNetworkPanel() {
     const list = document.getElementById('panel-network-list');
     document.getElementById('count-network').textContent = this.networkRequests.length;
@@ -663,6 +728,7 @@ class App {
     });
   }
 
+  /** Render Scripts tab: expandable rows, preview, view source locally, download. */
   renderScriptsPanel() {
     const list = document.getElementById('panel-scripts-list');
     document.getElementById('count-scripts').textContent = this.scripts.length;
@@ -778,6 +844,7 @@ class App {
     });
   }
 
+  /** Render Console tab: filtered list of log entries with level, text, timestamps. */
   renderConsolePanel() {
     const list = document.getElementById('panel-console-list');
     document.getElementById('count-console').textContent = this.consoleLogs.length;
@@ -800,12 +867,13 @@ class App {
       .join('');
   }
 
+  /** Render Raw tab: page source, DOM snapshot (at finish), and captured raw files; expand, copy, download, view source. */
   renderRawPanel() {
     const list = document.getElementById('panel-raw-list');
-    const totalCount = this.rawFiles.length + (this.pageSource ? 1 : 0);
+    const totalCount = this.rawFiles.length + (this.pageSource ? 1 : 0) + (this.domSnapshot ? 1 : 0);
     document.getElementById('count-raw').textContent = totalCount;
 
-    if (this.rawFiles.length === 0 && !this.pageSource) {
+    if (this.rawFiles.length === 0 && !this.pageSource && !this.domSnapshot) {
       list.innerHTML = '<div class="panel-empty">No files captured yet</div>';
       return;
     }
@@ -843,11 +911,36 @@ class App {
         </div>`;
     }
 
+    // DOM snapshot (at finish) pinned entry
+    let domSnapshotHtml = '';
+    if (this.domSnapshot && (!query || 'dom snapshot'.includes(query) || 'html'.includes(query))) {
+      const preview = this.domSnapshot.trim().substring(0, 150);
+      const sizeKb = (this.domSnapshot.length / 1024).toFixed(1);
+      domSnapshotHtml = `
+        <div class="raw-entry dom-snapshot-entry" data-dom-snapshot="true">
+          <div class="raw-row">
+            <div class="raw-header">
+              <span class="expand-arrow">&#9654;</span>
+              <span class="raw-type dom-snapshot-badge">DOM SNAPSHOT</span>
+              <span class="script-size">${sizeKb} KB</span>
+              <span class="script-actions">
+                <button class="icon-btn copy-content-btn" data-dom-snapshot="true" title="Copy HTML">Copy</button>
+                <button class="icon-btn dl-btn" data-dom-snapshot="true" title="Download">Download</button>
+                <button class="icon-btn view-src-btn" data-dom-snapshot="true" title="Open in full viewer">View</button>
+              </span>
+            </div>
+            <span class="raw-filename">HTML at finish time</span>
+            <div class="script-preview"><code class="language-html">${this.esc(preview)}${this.domSnapshot.length > 150 ? '...' : ''}</code></div>
+          </div>
+          <div class="script-content-expanded" style="display:none"><pre><code class="language-html">${this.esc(this.domSnapshot)}</code></pre></div>
+        </div>`;
+    }
+
     const filtered = query
       ? this.rawFiles.filter(f => f.url.toLowerCase().includes(query) || (f.content_type || '').toLowerCase().includes(query))
       : this.rawFiles;
 
-    list.innerHTML = pageSourceHtml + filtered
+    list.innerHTML = pageSourceHtml + domSnapshotHtml + filtered
       .map((f, i) => {
         const timeLabel = this._timeLabel(f.timestamp);
         const absTime = this._absTime(f.timestamp);
@@ -957,6 +1050,30 @@ class App {
       });
     });
 
+    // DOM snapshot buttons
+    list.querySelectorAll('.copy-content-btn[data-dom-snapshot]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.domSnapshot) {
+          navigator.clipboard.writeText(this.domSnapshot);
+          btn.classList.add('copied');
+          setTimeout(() => btn.classList.remove('copied'), 1000);
+        }
+      });
+    });
+    list.querySelectorAll('.dl-btn[data-dom-snapshot]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.domSnapshot) this._downloadFile('dom-snapshot.html', this.domSnapshot, 'text/html');
+      });
+    });
+    list.querySelectorAll('.view-src-btn[data-dom-snapshot]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (this.domSnapshot) this.showSourceViewer('DOM snapshot (at finish)', this.domSnapshot);
+      });
+    });
+
     list.querySelectorAll('.raw-row').forEach(row => {
       row.addEventListener('click', (e) => {
         if (e.target.closest('.icon-btn')) return;
@@ -971,6 +1088,7 @@ class App {
     });
   }
 
+  /** Fetch GET /api/analyses/:id/screenshots and render the screenshot gallery. */
   async loadScreenshotTimeline() {
     if (!this.currentAnalysisId) return;
     try {
@@ -984,6 +1102,7 @@ class App {
     }
   }
 
+  /** Render Screenshots tab: thumbnails with timestamps; click opens modal with prev/next and download. */
   renderScreenshotsPanel() {
     const list = document.getElementById('panel-screenshots-list');
     document.getElementById('count-screenshots').textContent = this.screenshotTimeline.length || this.screenshotTimelineCount || 0;
@@ -1110,10 +1229,27 @@ class App {
     return new Blob([arr], { type });
   }
 
+  /** Render Security tab: SSL, mixed content, suspicious patterns, clipboard, storage, headers, redirect export, risk factors; update count badge. */
   renderSecurityPanel() {
     const panel = document.getElementById('panel-security');
+    const countEl = document.getElementById('count-security');
+    const storageCount = this.storageCapture
+      ? this.storageCapture.cookies?.length + (this.storageCapture.local_storage?.length || 0) + (this.storageCapture.session_storage?.length || 0)
+      : 0;
+    const securityItemCount =
+      (this.security ? 2 + (this.security.suspicious_patterns?.length || 0) : 0) +
+      this.clipboardReads.length +
+      this.securityHeaders.length +
+      (this.redirectChain.length > 0 ? 1 : 0) +
+      (storageCount > 0 ? Math.min(storageCount, 99) : 0) +
+      this.riskFactors.length;
+    if (countEl) countEl.textContent = securityItemCount;
 
-    if (!this.security && this.riskFactors.length === 0 && this.clipboardReads.length === 0) {
+    const hasAny =
+      this.security || this.riskFactors.length > 0 || this.clipboardReads.length > 0 ||
+      (this.storageCapture && (this.storageCapture.cookies?.length || this.storageCapture.local_storage?.length || this.storageCapture.session_storage?.length)) ||
+      this.securityHeaders.length > 0 || this.redirectChain.length > 0;
+    if (!hasAny) {
       panel.innerHTML = '<div class="panel-empty">No security analysis yet</div>';
       return;
     }
@@ -1137,6 +1273,59 @@ class App {
     }
 
     html += '</div>';
+
+    // Redirect chain + export
+    if (this.redirectChain.length > 0 || this.finalUrl) {
+      html += '<div class="security-subsection"><h3 class="clipboard-heading">Redirect chain</h3>';
+      if (this.redirectChain.length > 0) {
+        this.redirectChain.forEach((r, i) => {
+          html += `<div class="security-item redirect-step"><span class="redirect-num">${i + 1}</span> <span class="redirect-from">${this.esc(r.from)}</span> → <span class="redirect-to">${this.esc(r.to)}</span> <span class="redirect-status">${r.status}</span></div>`;
+        });
+      }
+      if (this.finalUrl) {
+        html += `<div class="security-item"><strong>Final URL:</strong> <span class="redirect-to">${this.esc(this.finalUrl)}</span></div>`;
+      }
+      html += '<div class="redirect-export-actions"><button type="button" class="btn-export redirect-copy-btn">Copy as text</button> <button type="button" class="btn-export redirect-dl-json-btn">Download JSON</button></div></div>';
+    }
+
+    // Security headers (CSP, X-Frame-Options, etc.)
+    if (this.securityHeaders.length > 0) {
+      const importantNames = ['content-security-policy', 'x-frame-options', 'x-content-type-options', 'strict-transport-security', 'referrer-policy'];
+      html += '<div class="security-subsection"><h3 class="clipboard-heading">Security headers</h3>';
+      this.securityHeaders.forEach((h) => {
+        const name = (h.name || '').toLowerCase();
+        const isImportant = importantNames.some((n) => name === n);
+        const warn = name === 'content-security-policy' && (!h.value || h.value.length < 10) ? ' (weak or missing)' : '';
+        html += `<div class="security-item header-row${isImportant ? ' header-important' : ''}"><span class="header-name">${this.esc(h.name)}</span>: <span class="header-value" title="${this.esc(h.value)}">${this.esc(h.value.length > 120 ? h.value.slice(0, 120) + '…' : h.value)}</span>${warn}</div>`;
+      });
+      html += '</div>';
+    }
+
+    // Cookies & storage
+    if (this.storageCapture) {
+      const sens = (s) => /session|token|auth|csrf|sid|jwt|refresh|access_token|oauth|credential/i.test(s || '');
+      html += '<div class="security-subsection"><h3 class="clipboard-heading">Cookies & storage</h3>';
+      if (this.storageCapture.cookies?.length > 0) {
+        html += '<div class="storage-group"><strong>Cookies</strong> (' + this.storageCapture.cookies.length + ')</div>';
+        this.storageCapture.cookies.forEach((c) => {
+          const sensitive = sens(c.name);
+          html += `<div class="cookie-row${sensitive ? ' cookie-sensitive' : ''}"><span class="cookie-name">${this.esc(c.name)}</span>${sensitive ? ' <span class="cookie-flag" title="Sensitive name">⚠</span>' : ''} <span class="cookie-meta">${c.domain || ''} ${c.http_only ? 'HttpOnly' : ''} ${c.secure ? 'Secure' : ''}</span><br><span class="cookie-value">${this.esc((c.value || '').slice(0, 80))}${(c.value || '').length > 80 ? '…' : ''}</span></div>`;
+        });
+      }
+      if (this.storageCapture.local_storage?.length > 0) {
+        html += '<div class="storage-group"><strong>localStorage</strong> (' + this.storageCapture.local_storage.length + ')</div>';
+        this.storageCapture.local_storage.forEach((e) => {
+          html += `<div class="storage-entry"><span class="storage-key">${this.esc(e.key)}</span>: <span class="storage-value">${this.esc((e.value || '').slice(0, 60))}${(e.value || '').length > 60 ? '…' : ''}</span></div>`;
+        });
+      }
+      if (this.storageCapture.session_storage?.length > 0) {
+        html += '<div class="storage-group"><strong>sessionStorage</strong> (' + this.storageCapture.session_storage.length + ')</div>';
+        this.storageCapture.session_storage.forEach((e) => {
+          html += `<div class="storage-entry"><span class="storage-key">${this.esc(e.key)}</span>: <span class="storage-value">${this.esc((e.value || '').slice(0, 60))}${(e.value || '').length > 60 ? '…' : ''}</span></div>`;
+        });
+      }
+      html += '</div>';
+    }
 
     if (this.clipboardReads.length > 0) {
       const nonEmpty = this.clipboardReads.filter(r => r.content && r.content.length > 0);
@@ -1191,8 +1380,28 @@ class App {
         }
       });
     });
+
+    const redirectText = () => {
+      const lines = (this.redirectChain || []).map((r, i) => `${i + 1}. ${r.from} → ${r.to} (${r.status})`);
+      if (this.finalUrl) lines.push('Final: ' + this.finalUrl);
+      return lines.join('\n');
+    };
+    panel.querySelectorAll('.redirect-copy-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        navigator.clipboard.writeText(redirectText());
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = 'Copy as text'; }, 1500);
+      });
+    });
+    panel.querySelectorAll('.redirect-dl-json-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const payload = { redirect_chain: this.redirectChain || [], final_url: this.finalUrl || null };
+        this._downloadFile('redirect-chain.json', JSON.stringify(payload, null, 2), 'application/json');
+      });
+    });
   }
 
+  /** Run highlight.js on code blocks in the container. */
   _highlightCodeBlocks(container) {
     if (typeof hljs === 'undefined') return;
     container.querySelectorAll('code[class*="language-"]').forEach(block => {
@@ -1214,6 +1423,7 @@ class App {
     URL.revokeObjectURL(url);
   }
 
+  /** Open modal with full source (syntax-highlighted), copy and download buttons. */
   showSourceViewer(title, content) {
     let overlay = document.getElementById('source-viewer-overlay');
     if (!overlay) {
@@ -1284,12 +1494,14 @@ class App {
     return 'javascript';
   }
 
+  /** Send a JSON object over the viewer WebSocket. */
   wsSend(data) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     }
   }
 
+  /** Periodically fetch GET /api/status and update agent status indicator. */
   async pollAgentStatus() {
     const check = async () => {
       try {
@@ -1342,6 +1554,7 @@ class App {
     return rel ? `${abs} (${rel})` : abs;
   }
 
+  /** Escape HTML for safe insertion into innerHTML. */
   esc(str) {
     const el = document.createElement('span');
     el.textContent = str || '';

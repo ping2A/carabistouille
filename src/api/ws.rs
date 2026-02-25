@@ -1,3 +1,5 @@
+//! WebSocket handlers: agent connection (commands out, events in) and viewer connection (events out).
+
 use std::sync::atomic::Ordering;
 
 use axum::{
@@ -14,6 +16,7 @@ use crate::models::AnalysisStatus;
 use crate::protocol::{AgentCommand, AgentEvent};
 use crate::state::AppState;
 
+/// WebSocket upgrade for /ws/agent. One agent connects; receives commands, sends events.
 pub async fn agent_ws_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
@@ -21,6 +24,7 @@ pub async fn agent_ws_handler(
     ws.on_upgrade(|socket| handle_agent_connection(socket, state))
 }
 
+/// Run the agent connection: subscribe to commands, forward to WS; receive messages, parse as events and handle.
 async fn handle_agent_connection(socket: WebSocket, state: AppState) {
     tracing::info!("Agent connected");
     state.agent_connected.store(true, Ordering::Relaxed);
@@ -82,6 +86,7 @@ async fn handle_agent_connection(socket: WebSocket, state: AppState) {
     tracing::info!("Agent disconnected");
 }
 
+/// Update server state from an agent event and forward the event to any viewers for that analysis.
 async fn handle_agent_event(state: &AppState, event: AgentEvent) {
     match &event {
         AgentEvent::Screenshot {
@@ -235,6 +240,9 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 if let Some(existing) = &analysis.report {
                     merged.raw_files = existing.raw_files.clone();
                     merged.page_source = existing.page_source.clone();
+                    merged.dom_snapshot = existing.dom_snapshot.clone();
+                    merged.storage_capture = existing.storage_capture.clone();
+                    merged.security_headers = existing.security_headers.clone();
                 }
                 analysis.report = Some(merged);
             }
@@ -274,6 +282,39 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             forward_to_viewer(state, analysis_id, &event);
         }
 
+        AgentEvent::StorageCaptured { analysis_id, capture } => {
+            tracing::debug!(
+                "Storage for {}: {} cookies, {} localStorage, {} sessionStorage",
+                analysis_id,
+                capture.cookies.len(),
+                capture.local_storage.len(),
+                capture.session_storage.len()
+            );
+            if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+                let report = analysis.report.get_or_insert_with(Default::default);
+                report.storage_capture = Some(capture.clone());
+            }
+            forward_to_viewer(state, analysis_id, &event);
+        }
+
+        AgentEvent::SecurityHeadersCaptured { analysis_id, headers } => {
+            tracing::debug!("Security headers for {}: {} headers", analysis_id, headers.len());
+            if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+                let report = analysis.report.get_or_insert_with(Default::default);
+                report.security_headers = headers.clone();
+            }
+            forward_to_viewer(state, analysis_id, &event);
+        }
+
+        AgentEvent::DomSnapshotCaptured { analysis_id, html } => {
+            tracing::debug!("DOM snapshot for {} ({} bytes)", analysis_id, html.len());
+            if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+                let report = analysis.report.get_or_insert_with(Default::default);
+                report.dom_snapshot = Some(html.clone());
+            }
+            forward_to_viewer(state, analysis_id, &event);
+        }
+
         AgentEvent::ClipboardCaptured { analysis_id, read } => {
             tracing::debug!(
                 "Clipboard read for {} (trigger: {}, {} bytes)",
@@ -305,6 +346,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
     }
 }
 
+/// Serialize the event and send it to all viewers subscribed to this analysis.
 fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {
     let viewer_tx = state.get_viewer_tx(analysis_id);
     if let Ok(json) = serde_json::to_string(event) {
@@ -328,11 +370,13 @@ fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {
     }
 }
 
+/// Forward raw JSON to viewers (e.g. when event did not parse as AgentEvent).
 fn forward_raw_to_viewer(state: &AppState, analysis_id: &str, json: &str) {
     let viewer_tx = state.get_viewer_tx(analysis_id);
     let _ = viewer_tx.send(json.to_string());
 }
 
+/// WebSocket upgrade for /ws/viewer/:id. Viewer receives events for that analysis; can send click/scroll/stop etc.
 pub async fn viewer_ws_handler(
     ws: WebSocketUpgrade,
     Path(analysis_id): Path<String>,
@@ -341,6 +385,7 @@ pub async fn viewer_ws_handler(
     ws.on_upgrade(move |socket| handle_viewer_connection(socket, analysis_id, state))
 }
 
+/// Run the viewer connection: send report_snapshot + last screenshot + timeline notice, then forward all events; handle incoming commands.
 async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state: AppState) {
     tracing::info!("Viewer connected for analysis {}", analysis_id);
 

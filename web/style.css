@@ -47,14 +47,28 @@ header {
 
 .header-left {
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  align-items: center;
+  gap: 14px;
+}
+
+.header-logo {
+  height: 42px;
+  width: auto;
+  display: block;
+  flex-shrink: 0;
+}
+
+.header-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 header h1 {
   font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.02em;
+  margin: 0;
 }
 
 .subtitle {
@@ -482,9 +496,9 @@ main {
 
 /* Report panel */
 .report-panel {
-  width: 560px;
-  min-width: 320px;
-  max-width: 65vw;
+  width: 640px;
+  min-width: 360px;
+  max-width: 72vw;
   background: var(--bg-secondary);
   border-left: none;
   display: flex;
@@ -933,6 +947,145 @@ main {
   font-size: 10px !important;
   width: auto !important;
   padding: 2px 8px !important;
+}
+
+/* Security subsections (redirect, headers, storage) */
+.security-subsection {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.redirect-step {
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.redirect-num {
+  color: var(--text-tertiary);
+  margin-right: 4px;
+}
+
+.redirect-from {
+  color: var(--text-secondary);
+}
+
+.redirect-to {
+  color: var(--accent);
+}
+
+.redirect-status {
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
+.redirect-export-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+.btn-export {
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.btn-export:hover {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
+.header-row {
+  flex-wrap: wrap;
+}
+
+.header-name {
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: capitalize;
+}
+
+.header-value {
+  word-break: break-all;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.header-important .header-name {
+  color: var(--warning);
+}
+
+.storage-group {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.storage-group:first-of-type {
+  margin-top: 4px;
+}
+
+.cookie-row,
+.storage-entry {
+  padding: 4px 0;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  word-break: break-all;
+  border-bottom: 1px solid var(--border);
+}
+
+.cookie-row:last-child,
+.storage-entry:last-child {
+  border-bottom: none;
+}
+
+.cookie-sensitive {
+  border-left: 3px solid var(--warning);
+  padding-left: 6px;
+}
+
+.cookie-flag {
+  color: var(--warning);
+}
+
+.cookie-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cookie-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.cookie-value {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.storage-key {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.storage-value {
+  color: var(--text-secondary);
+}
+
+.dom-snapshot-entry {
+  border-left: 3px solid var(--success);
+}
+
+.dom-snapshot-badge {
+  background: var(--success) !important;
+  color: white !important;
+  font-weight: 600;
+  letter-spacing: 0.3px;
 }
 
 .clipboard-preview {

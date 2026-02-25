@@ -1,3 +1,5 @@
+//! REST API handlers: status, create/list/get/stop/delete analyses, get screenshots.
+
 use std::sync::atomic::Ordering;
 
 use axum::{
@@ -13,12 +15,14 @@ use crate::models::{Analysis, AnalysisStatus};
 use crate::protocol::AgentCommand;
 use crate::state::AppState;
 
+/// Request body for POST /api/analyses (url required, proxy optional).
 #[derive(Deserialize)]
 pub struct CreateAnalysisRequest {
     pub url: String,
     pub proxy: Option<String>,
 }
 
+/// Response for POST /api/analyses (id, url, status).
 #[derive(Serialize)]
 pub struct CreateAnalysisResponse {
     pub id: String,
@@ -26,6 +30,7 @@ pub struct CreateAnalysisResponse {
     pub status: AnalysisStatus,
 }
 
+/// GET /api/status — agent connected flag and total analyses count.
 pub async fn get_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "agent_connected": state.agent_connected.load(Ordering::Relaxed),
@@ -33,6 +38,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<serde_json::Value
     }))
 }
 
+/// POST /api/analyses — create analysis, send Navigate to agent, return 201 or 503 if no agent.
 pub async fn create_analysis(
     State(state): State<AppState>,
     Json(req): Json<CreateAnalysisRequest>,
@@ -74,6 +80,7 @@ pub async fn create_analysis(
     ))
 }
 
+/// GET /api/analyses — list all analyses (newest first), without screenshot/timeline payloads.
 pub async fn list_analyses(State(state): State<AppState>) -> Json<Vec<Analysis>> {
     let mut analyses: Vec<Analysis> = state
         .analyses
@@ -89,6 +96,7 @@ pub async fn list_analyses(State(state): State<AppState>) -> Json<Vec<Analysis>>
     Json(analyses)
 }
 
+/// GET /api/analyses/:id — full analysis + report; includes last screenshot for complete/error.
 pub async fn get_analysis(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -109,6 +117,7 @@ pub async fn get_analysis(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+/// GET /api/analyses/:id/screenshots — screenshot timeline (sampled entries) for that analysis.
 pub async fn get_screenshots(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -120,6 +129,7 @@ pub async fn get_screenshots(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+/// POST /api/analyses/:id/stop — send StopAnalysis to agent; 202 accepted or 404/409.
 pub async fn stop_analysis(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -147,6 +157,7 @@ pub async fn stop_analysis(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// DELETE /api/analyses/:id — remove analysis and its viewer channel; 204 or 404.
 pub async fn delete_analysis(
     State(state): State<AppState>,
     Path(id): Path<String>,
