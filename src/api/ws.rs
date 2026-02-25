@@ -246,6 +246,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 }
                 analysis.report = Some(merged);
             }
+            state.cancel_analysis_timeout(analysis_id);
             forward_to_viewer(state, analysis_id, &event);
         }
 
@@ -337,6 +338,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
                 analysis.status = AnalysisStatus::Error;
             }
+            state.cancel_analysis_timeout(analysis_id);
             forward_to_viewer(state, analysis_id, &event);
         }
 

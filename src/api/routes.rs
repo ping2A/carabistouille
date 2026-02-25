@@ -1,6 +1,7 @@
 //! REST API handlers: status, create/list/get/stop/delete analyses, get screenshots.
 
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::{
     extract::{Path, State},
@@ -13,7 +14,7 @@ use uuid::Uuid;
 
 use crate::models::{Analysis, AnalysisStatus};
 use crate::protocol::AgentCommand;
-use crate::state::AppState;
+use crate::state::{AppState, DEFAULT_ANALYSIS_TIMEOUT_SECS};
 
 /// Request body for POST /api/analyses (url required, proxy optional).
 #[derive(Deserialize)]
@@ -69,6 +70,19 @@ pub async fn create_analysis(
         url: req.url.clone(),
         proxy: req.proxy.clone(),
     });
+
+    // Force-stop analysis after 5 minutes if still running
+    let state_timeout = state.clone();
+    let analysis_id_timeout = id.clone();
+    let cmd_tx = state.agent_cmd_tx.clone();
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(DEFAULT_ANALYSIS_TIMEOUT_SECS)).await;
+        let _ = cmd_tx.send(AgentCommand::StopAnalysis {
+            analysis_id: analysis_id_timeout.clone(),
+        });
+        state_timeout.cancel_analysis_timeout(&analysis_id_timeout);
+    });
+    state.analysis_timeouts.insert(id.clone(), handle);
 
     Ok((
         StatusCode::CREATED,
@@ -151,8 +165,9 @@ pub async fn stop_analysis(
     drop(analysis);
 
     let _ = state.agent_cmd_tx.send(AgentCommand::StopAnalysis {
-        analysis_id: id,
+        analysis_id: id.clone(),
     });
+    state.cancel_analysis_timeout(&id);
 
     Ok(StatusCode::ACCEPTED)
 }
@@ -164,6 +179,7 @@ pub async fn delete_analysis(
 ) -> StatusCode {
     if state.analyses.remove(&id).is_some() {
         state.viewer_channels.remove(&id);
+        state.cancel_analysis_timeout(&id);
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
