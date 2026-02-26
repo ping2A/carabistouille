@@ -145,16 +145,24 @@ Each analysis spawns a **new** headless Chromium (no shared browser).
 
  page 'request' event
        |
-       +---> network_request_captured ---> update report     ---> add to Network tab
+       +---> (store request: URL, method, resource_type, request_headers, request_body,
+       |      initiator, is_navigation; status/response filled on response or failure)
 
  page 'response' event
        |
        +---> redirect_detected ----------> update redirect   ---> log redirect
        |                                   chain
-       +---> network_request_captured ---> update report     ---> update Network tab
+       +---> network_request_captured ---> update report     ---> add/update Network tab
+       |      (status, response_headers, timing, security_details, from_cache,
+       |       from_service_worker, response_size, remote_port)
        |
        +---> raw_file_captured ----------> store in report   ---> add to Raw tab
                                            (text responses)
+
+ page 'requestfailed' event
+       |
+       +---> network_request_captured ---> update report     ---> update Network tab
+              (failure error text, status_text: Failed)
 
  page 'console' event
        |
@@ -370,7 +378,15 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 
 ### Capture & Monitoring
 
-- **Network requests** — Full URL, method, status, content type, size, remote IP, third-party detection, absolute + relative timestamps.
+- **Network requests** — For each request/response the agent captures:
+  - **Basic:** URL, method, status, status text, content type, response size, remote IP and port, third-party flag, resource type (document, script, stylesheet, xhr, fetch, image, font, media, etc.), navigation flag, from-cache and from-service-worker flags.
+  - **Request:** Full request headers and optional request body (payload); POST/PUT bodies are captured and shown with JSON pretty-print when applicable.
+  - **Response:** Full response headers; for text-based responses (HTML, JS, CSS, JSON, etc.) the response body is also captured and available as a preview in the request detail pane.
+  - **Timing:** DNS, connect, SSL/TLS, send, wait (TTFB), and receive phases with durations; shown as a visual waterfall in the detail pane.
+  - **TLS/SSL:** Protocol, issuer, subject name, and certificate validity dates when the response is over HTTPS.
+  - **Initiator:** What triggered the request (type, URL, line number) when available.
+  - **Failures:** Failed requests (e.g. blocked, DNS error) are recorded with error text via the `requestfailed` event.
+  In the UI, the Network tab lists all requests with status, method, resource type (color-coded), and optional cache/SW badges. A **resource type filter** (All, Doc, JS, CSS, XHR, Img, Font, Media, Other) narrows the list. Clicking a row opens an **expandable detail pane** with tabs: **General** (URL, method, status, sizes, remote address, cache/SW), **Request Headers**, **Response Headers**, **Payload** (request body), **Timing** (waterfall), **TLS/SSL**, **Initiator**, and **Response** (response body preview from captured raw files). Each headers/payload section has a copy button.
 - **Scripts** — External scripts with full source code capture, inline `<script>` tag detection (live during analysis + at stop). View source locally with syntax highlighting.
 - **Console logs** — All `console.*` messages with timestamps.
 - **Raw files** — Full response bodies of text-based resources (HTML, JS, CSS, JSON, XML, SVG) stored server-side and persisted across analysis switches. Expandable with syntax highlighting, copy, and download.
@@ -393,7 +409,8 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Theme** — Toggle between dark and light theme; choice persisted in the browser.
 - **Multi-language** — English, French, and Chinese; language persisted in the browser.
 - **Resizable report panel** — Drag the divider to adjust panel width (default 560px, up to 65vw).
-- **Search/filter** in Network, Scripts, Console, and Raw tabs.
+- **Search/filter** in Network, Scripts, Console, and Raw tabs; **resource type filter** in Network tab (All, Doc, JS, CSS, XHR, Img, Font, Media, Other).
+- **Expandable request details** — Click any network row to open a detail pane with tabs: General, Request Headers, Response Headers, Payload, Timing (waterfall), TLS/SSL, Initiator, Response (body preview). Copy buttons on headers and payload sections.
 - **Full source viewer** — Modal with syntax highlighting (highlight.js), copy and download buttons.
 - **Copy buttons** — URLs and content can be copied to clipboard with one click.
 - **Download buttons** — Download any raw file, script source, page source, or screenshot.
@@ -556,7 +573,7 @@ Example: `cargo run -- --clean-db` or `./carabistouille --clean-db`.
 | Endpoint | Direction | Description |
 |----------|-----------|-------------|
 | `/ws/agent` | Server -> Agent | Commands: navigate (url, proxy, user_agent), click, scroll, move_mouse, type_text, key_press, inspect_element, stop_analysis |
-| `/ws/agent` | Agent -> Server | Events: screenshot, network_request_captured, console_log_captured, redirect_detected, script_loaded, navigation_complete, raw_file_captured, page_source_captured, clipboard_captured, analysis_complete, element_info, error, agent_ready |
+| `/ws/agent` | Agent -> Server | Events: screenshot, network_request_captured, console_log_captured, redirect_detected, script_loaded, navigation_complete, raw_file_captured, page_source_captured, clipboard_captured, analysis_complete, element_info, error, agent_ready. *network_request_captured* carries full request/response metadata (headers, payload, timing, TLS, initiator, failure). |
 | `/ws/viewer/:id` | Viewer -> Server | Commands: click, scroll, mousemove, type_text, keypress, inspect, stop_analysis |
 | `/ws/viewer/:id` | Server -> Viewer | All agent events forwarded + report_snapshot on connect + screenshot_timeline_available notification |
 

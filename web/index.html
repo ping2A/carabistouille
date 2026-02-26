@@ -130,7 +130,20 @@
       </div>
       <div class="tab-panels">
         <div class="tab-panel active" id="panel-network">
-          <div class="panel-search"><input type="text" id="search-network" class="search-input" data-i18n-placeholder="app.filterRequests" placeholder="Filter requests..."></div>
+          <div class="panel-search">
+            <input type="text" id="search-network" class="search-input" data-i18n-placeholder="app.filterRequests" placeholder="Filter requests...">
+            <div class="net-type-filters" id="net-type-filters">
+              <button class="net-type-filter active" data-type="all">All</button>
+              <button class="net-type-filter" data-type="document">Doc</button>
+              <button class="net-type-filter" data-type="script">JS</button>
+              <button class="net-type-filter" data-type="stylesheet">CSS</button>
+              <button class="net-type-filter" data-type="xhr,fetch">XHR</button>
+              <button class="net-type-filter" data-type="image">Img</button>
+              <button class="net-type-filter" data-type="font">Font</button>
+              <button class="net-type-filter" data-type="media">Media</button>
+              <button class="net-type-filter" data-type="other">Other</button>
+            </div>
+          </div>
           <div id="panel-network-list" class="panel-list"><div class="panel-empty" data-i18n="app.noNetwork">No network data yet</div></div>
         </div>
         <div class="tab-panel" id="panel-scripts">

@@ -796,7 +796,7 @@ main {
 /* Network request rows */
 .net-row {
   display: grid;
-  grid-template-columns: 76px 42px 42px 1fr;
+  grid-template-columns: 76px 42px 42px 56px 1fr;
   grid-template-rows: auto auto;
   gap: 2px 6px;
   align-items: center;
@@ -861,9 +861,211 @@ main {
 }
 
 .net-type {
-  grid-column: 4;
+  grid-column: 5;
   font-size: 10px;
   color: var(--text-tertiary);
+}
+
+.net-row { cursor: pointer; }
+.net-row-expanded { background: var(--bg-tertiary); }
+
+.net-detail {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  margin: 0 4px 6px;
+  overflow: hidden;
+}
+
+.net-detail-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.net-detail-tab {
+  padding: 6px 14px;
+  border: none;
+  background: none;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.net-detail-tab:hover { color: var(--text-secondary); }
+.net-detail-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.net-detail-content {
+  padding: 8px 12px;
+}
+
+.net-detail-kv {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 12px;
+  line-height: 1.4;
+  border-bottom: 1px solid var(--border);
+}
+
+.net-detail-kv:last-child { border-bottom: none; }
+
+.net-detail-key {
+  flex-shrink: 0;
+  width: 100px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+
+.net-detail-val {
+  color: var(--text-primary);
+  word-break: break-all;
+  min-width: 0;
+}
+
+.net-detail-section-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.net-detail-pre {
+  margin: 0;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 260px;
+  overflow: auto;
+  line-height: 1.5;
+}
+
+.net-detail-size {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-right: auto;
+}
+
+.net-detail-empty {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+  padding: 8px 0;
+}
+
+.net-resource-type {
+  font-size: 9px;
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.net-status.sfail { color: var(--danger); font-weight: 700; }
+
+.net-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.net-badge-cache {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+.net-badge-sw {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--success);
+}
+
+.net-type-filters {
+  display: flex;
+  gap: 2px;
+  padding: 4px 0 0;
+  flex-wrap: wrap;
+}
+
+.net-type-filter {
+  border: none;
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.net-type-filter:hover { color: var(--text-secondary); background: var(--bg-hover); }
+.net-type-filter.active { background: var(--accent); color: #fff; }
+
+.net-timing-waterfall {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.net-timing-row {
+  display: grid;
+  grid-template-columns: 80px 1fr 60px;
+  align-items: center;
+  gap: 8px;
+}
+
+.net-timing-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+.net-timing-bar-wrap {
+  height: 14px;
+  background: var(--bg-tertiary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.net-timing-bar {
+  height: 100%;
+  border-radius: 3px;
+  min-width: 2px;
+  transition: width 0.2s ease;
+}
+
+.net-timing-dur {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  text-align: right;
+}
+
+.net-timing-total {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-align: right;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
 }
 
 /* Shared icon button */

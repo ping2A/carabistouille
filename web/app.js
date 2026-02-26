@@ -150,6 +150,15 @@ class App {
     });
 
     document.getElementById('search-network').addEventListener('input', () => this.renderNetworkPanel());
+    this._activeNetTypeFilter = 'all';
+    document.querySelectorAll('#net-type-filters .net-type-filter').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('#net-type-filters .net-type-filter').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        this._activeNetTypeFilter = btn.dataset.type;
+        this.renderNetworkPanel();
+      });
+    });
     document.getElementById('search-scripts').addEventListener('input', () => this.renderScriptsPanel());
     document.getElementById('search-console').addEventListener('input', () => this.renderConsolePanel());
     document.getElementById('search-raw').addEventListener('input', () => this.renderRawPanel());
@@ -725,7 +734,7 @@ class App {
     else this.riskBadge.classList.add('high');
   }
 
-  /** Render Network tab: filtered list of requests with status, method, URL, copy/JS buttons. */
+  /** Render Network tab with type filters, resource type badges, and expandable request details. */
   renderNetworkPanel() {
     const list = document.getElementById('panel-network-list');
     document.getElementById('count-network').textContent = this.networkRequests.length;
@@ -736,25 +745,57 @@ class App {
     }
 
     const query = (document.getElementById('search-network')?.value || '').toLowerCase();
-    const filtered = query
-      ? this.networkRequests.filter(r => r.url.toLowerCase().includes(query) || (r.content_type || '').toLowerCase().includes(query) || r.method.toLowerCase().includes(query))
-      : this.networkRequests;
+    const typeFilter = this._activeNetTypeFilter || 'all';
+    const knownTypes = ['document','script','stylesheet','xhr','fetch','image','font','media','websocket','manifest','ping','preflight','other'];
+
+    let filtered = this.networkRequests;
+    if (typeFilter !== 'all') {
+      const types = typeFilter.split(',');
+      filtered = filtered.filter(r => {
+        const rt = (r.resource_type || '').toLowerCase();
+        if (types.includes(rt)) return true;
+        if (typeFilter === 'other') return !knownTypes.includes(rt) || !rt;
+        return false;
+      });
+    }
+    if (query) {
+      filtered = filtered.filter(r =>
+        r.url.toLowerCase().includes(query) ||
+        (r.content_type || '').toLowerCase().includes(query) ||
+        r.method.toLowerCase().includes(query) ||
+        (r.resource_type || '').toLowerCase().includes(query)
+      );
+    }
+
+    const TYPE_COLORS = {
+      document: '#3b82f6', script: '#f59e0b', stylesheet: '#8b5cf6', xhr: '#10b981',
+      fetch: '#10b981', image: '#ec4899', font: '#6366f1', media: '#f97316',
+      websocket: '#14b8a6', manifest: '#64748b', ping: '#64748b', other: '#6b7280',
+    };
 
     list.innerHTML = filtered
-      .map((r, i) => {
-        const statusClass = r.status ? `s${Math.floor(r.status / 100)}xx` : '';
+      .map((r) => {
+        const origIdx = this.networkRequests.indexOf(r);
+        const statusClass = r.status ? `s${Math.floor(r.status / 100)}xx` : (r.failure ? 'sfail' : '');
         const thirdPartyClass = r.is_third_party ? 'third-party' : '';
         const ct = r.content_type || '';
         const isJs = ct.includes('javascript') || r.url.endsWith('.js');
         const scriptMatch = isJs ? this.scripts.find(s => s.url === r.url && s.content) : null;
         const timeLabel = this._timeLabel(r.timestamp);
+        const rt = (r.resource_type || 'other').toLowerCase();
+        const typeColor = TYPE_COLORS[rt] || TYPE_COLORS.other;
+        const statusDisplay = r.failure ? 'ERR' : (r.status || '...');
+        const cacheTag = r.from_cache ? '<span class="net-badge net-badge-cache">cache</span>' : '';
+        const swTag = r.from_service_worker ? '<span class="net-badge net-badge-sw">SW</span>' : '';
         return `
-        <div class="net-row" data-idx="${i}">
+        <div class="net-row" data-idx="${origIdx}">
           <span class="net-time" title="${timeLabel}">${this._absTime(r.timestamp)}</span>
-          <span class="net-status ${statusClass}">${r.status || '...'}</span>
+          <span class="net-status ${statusClass}">${statusDisplay}</span>
           <span class="net-method">${this.esc(r.method)}</span>
+          <span class="net-resource-type" style="color:${typeColor}">${this.esc(rt)}</span>
           <div class="net-url-wrap">
             <span class="net-url-full ${thirdPartyClass}">${this.esc(r.url)}</span>
+            ${cacheTag}${swTag}
             <span class="net-actions">
               <button class="icon-btn copy-btn" data-url="${this.esc(r.url)}" title="${this.t('app.copyUrl')}">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
@@ -783,6 +824,224 @@ class App {
         if (script?.content) this.showSourceViewer(script.url || '(inline)', script.content);
       });
     });
+
+    list.querySelectorAll('.net-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const existing = row.nextElementSibling;
+        if (existing && existing.classList.contains('net-detail')) {
+          existing.remove();
+          row.classList.remove('net-row-expanded');
+          return;
+        }
+        list.querySelectorAll('.net-detail').forEach(d => d.remove());
+        list.querySelectorAll('.net-row-expanded').forEach(r => r.classList.remove('net-row-expanded'));
+
+        const idx = parseInt(row.dataset.idx, 10);
+        const r = this.networkRequests[idx];
+        if (!r) return;
+
+        row.classList.add('net-row-expanded');
+        const detail = document.createElement('div');
+        detail.className = 'net-detail';
+        detail.innerHTML = this._buildRequestDetail(r);
+        row.after(detail);
+
+        detail.querySelectorAll('.net-detail-copy').forEach(btn => {
+          btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const target = btn.dataset.copyTarget;
+            const el = detail.querySelector(`[data-section="${target}"]`);
+            if (el) {
+              navigator.clipboard.writeText(el.textContent);
+              btn.textContent = 'Copied!';
+              setTimeout(() => { btn.textContent = this.t('app.copy'); }, 1200);
+            }
+          });
+        });
+
+        detail.querySelectorAll('.net-detail-tab').forEach(tab => {
+          tab.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const tabName = tab.dataset.detailTab;
+            detail.querySelectorAll('.net-detail-tab').forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            detail.querySelectorAll('.net-detail-content').forEach(c => { c.style.display = 'none'; });
+            const target = detail.querySelector(`[data-detail-tab-content="${tabName}"]`);
+            if (target) target.style.display = '';
+          });
+        });
+      });
+    });
+  }
+
+  _formatHeaders(headers) {
+    if (!headers || typeof headers !== 'object') return null;
+    return Object.entries(headers)
+      .map(([k, v]) => `${this.esc(k)}: ${this.esc(String(v))}`)
+      .join('\n');
+  }
+
+  _kv(key, val) {
+    return `<div class="net-detail-kv"><span class="net-detail-key">${this.esc(key)}</span><span class="net-detail-val">${val}</span></div>`;
+  }
+
+  _buildRequestDetail(r) {
+    const s = [];
+    const reqHeaders = this._formatHeaders(r.request_headers);
+    const respHeaders = this._formatHeaders(r.response_headers);
+    const hasPayload = r.request_body && r.request_body.length > 0;
+    const hasTiming = r.timing && typeof r.timing === 'object';
+    const hasSecurity = r.security_details && typeof r.security_details === 'object';
+    const hasInitiator = r.initiator && typeof r.initiator === 'object';
+    const hasResponse = this.rawFiles.find(f => f.url === r.url);
+
+    s.push('<div class="net-detail-tabs">');
+    s.push(`<button class="net-detail-tab active" data-detail-tab="general">${this.t('app.detailGeneral')}</button>`);
+    if (reqHeaders) s.push(`<button class="net-detail-tab" data-detail-tab="req-headers">${this.t('app.detailReqHeaders')}</button>`);
+    if (respHeaders) s.push(`<button class="net-detail-tab" data-detail-tab="resp-headers">${this.t('app.detailRespHeaders')}</button>`);
+    if (hasPayload) s.push(`<button class="net-detail-tab" data-detail-tab="payload">${this.t('app.detailPayload')}</button>`);
+    if (hasTiming) s.push(`<button class="net-detail-tab" data-detail-tab="timing">${this.t('app.detailTiming')}</button>`);
+    if (hasSecurity) s.push(`<button class="net-detail-tab" data-detail-tab="security">${this.t('app.detailSecurity')}</button>`);
+    if (hasInitiator) s.push(`<button class="net-detail-tab" data-detail-tab="initiator">${this.t('app.detailInitiator')}</button>`);
+    if (hasResponse) s.push(`<button class="net-detail-tab" data-detail-tab="response">${this.t('app.detailResponse')}</button>`);
+    s.push('</div>');
+
+    // General tab
+    s.push('<div class="net-detail-content" data-detail-tab-content="general">');
+    s.push(this._kv('URL', this.esc(r.url)));
+    s.push(this._kv('Method', this.esc(r.method)));
+    const statusStr = r.failure ? `<span style="color:var(--danger)">Failed — ${this.esc(r.failure)}</span>` : `${r.status || 'pending'}${r.status_text ? ' ' + this.esc(r.status_text) : ''}`;
+    s.push(this._kv('Status', statusStr));
+    if (r.resource_type) s.push(this._kv('Resource Type', this.esc(r.resource_type)));
+    if (r.content_type) s.push(this._kv('Content-Type', this.esc(r.content_type)));
+    if (r.response_size != null) s.push(this._kv('Response Size', this._formatSize(r.response_size)));
+    if (r.remote_ip) {
+      const addr = r.remote_port ? `${r.remote_ip}:${r.remote_port}` : r.remote_ip;
+      s.push(this._kv('Remote Address', this.esc(addr)));
+    }
+    s.push(this._kv('Third-party', r.is_third_party ? 'Yes' : 'No'));
+    if (r.is_navigation) s.push(this._kv('Navigation', 'Yes'));
+    if (r.from_cache) s.push(this._kv('From Cache', 'Yes'));
+    if (r.from_service_worker) s.push(this._kv('Service Worker', 'Yes'));
+    s.push('</div>');
+
+    // Request Headers tab
+    if (reqHeaders) {
+      s.push('<div class="net-detail-content" data-detail-tab-content="req-headers" style="display:none">');
+      s.push(`<div class="net-detail-section-bar"><button class="net-detail-copy icon-btn" data-copy-target="req-headers">${this.t('app.copy')}</button></div>`);
+      s.push(`<pre class="net-detail-pre" data-section="req-headers">${reqHeaders}</pre>`);
+      s.push('</div>');
+    }
+
+    // Response Headers tab
+    if (respHeaders) {
+      s.push('<div class="net-detail-content" data-detail-tab-content="resp-headers" style="display:none">');
+      s.push(`<div class="net-detail-section-bar"><button class="net-detail-copy icon-btn" data-copy-target="resp-headers">${this.t('app.copy')}</button></div>`);
+      s.push(`<pre class="net-detail-pre" data-section="resp-headers">${respHeaders}</pre>`);
+      s.push('</div>');
+    }
+
+    // Payload tab
+    if (hasPayload) {
+      let prettyPayload = r.request_body;
+      try {
+        const parsed = JSON.parse(r.request_body);
+        prettyPayload = this.esc(JSON.stringify(parsed, null, 2));
+      } catch { prettyPayload = this.esc(r.request_body); }
+
+      s.push('<div class="net-detail-content" data-detail-tab-content="payload" style="display:none">');
+      s.push(`<div class="net-detail-section-bar"><span class="net-detail-size">${this._formatSize(r.request_body.length)}</span><button class="net-detail-copy icon-btn" data-copy-target="payload">${this.t('app.copy')}</button></div>`);
+      s.push(`<pre class="net-detail-pre" data-section="payload">${prettyPayload}</pre>`);
+      s.push('</div>');
+    }
+
+    // Timing tab
+    if (hasTiming) {
+      s.push('<div class="net-detail-content" data-detail-tab-content="timing" style="display:none">');
+      s.push(this._buildTimingWaterfall(r.timing));
+      s.push('</div>');
+    }
+
+    // Security tab
+    if (hasSecurity) {
+      const sec = r.security_details;
+      s.push('<div class="net-detail-content" data-detail-tab-content="security" style="display:none">');
+      if (sec.protocol) s.push(this._kv('Protocol', this.esc(String(sec.protocol))));
+      if (sec.issuer) s.push(this._kv('Issuer', this.esc(String(sec.issuer))));
+      if (sec.subjectName) s.push(this._kv('Subject', this.esc(String(sec.subjectName))));
+      if (sec.validFrom != null) s.push(this._kv('Valid From', this._formatCertDate(sec.validFrom)));
+      if (sec.validTo != null) s.push(this._kv('Valid To', this._formatCertDate(sec.validTo)));
+      s.push('</div>');
+    }
+
+    // Initiator tab
+    if (hasInitiator) {
+      const init = r.initiator;
+      s.push('<div class="net-detail-content" data-detail-tab-content="initiator" style="display:none">');
+      if (init.type) s.push(this._kv('Type', this.esc(String(init.type))));
+      if (init.url) s.push(this._kv('URL', this.esc(String(init.url))));
+      if (init.lineNumber != null) s.push(this._kv('Line', String(init.lineNumber)));
+      s.push('</div>');
+    }
+
+    // Response body preview tab
+    if (hasResponse) {
+      const preview = hasResponse.content || '';
+      const truncated = preview.length > 5000 ? preview.substring(0, 5000) + '\n… (truncated)' : preview;
+      s.push('<div class="net-detail-content" data-detail-tab-content="response" style="display:none">');
+      s.push(`<div class="net-detail-section-bar"><span class="net-detail-size">${this._formatSize(preview.length)}</span><button class="net-detail-copy icon-btn" data-copy-target="response">${this.t('app.copy')}</button></div>`);
+      s.push(`<pre class="net-detail-pre" data-section="response">${this.esc(truncated)}</pre>`);
+      s.push('</div>');
+    }
+
+    return s.join('');
+  }
+
+  _formatSize(bytes) {
+    if (bytes == null) return '—';
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+  }
+
+  _formatCertDate(epoch) {
+    if (epoch == null) return '—';
+    try {
+      const d = new Date(typeof epoch === 'number' && epoch < 1e12 ? epoch * 1000 : epoch);
+      return d.toISOString().replace('T', ' ').replace(/\.\d+Z/, ' UTC');
+    } catch { return String(epoch); }
+  }
+
+  _buildTimingWaterfall(timing) {
+    if (!timing) return '';
+    const phases = [];
+    const push = (label, startMs, endMs, color) => {
+      if (startMs >= 0 && endMs >= 0 && endMs > startMs) {
+        phases.push({ label, duration: (endMs - startMs).toFixed(1), color });
+      }
+    };
+    push('DNS', timing.dnsStart, timing.dnsEnd, '#3b82f6');
+    push('Connect', timing.connectStart, timing.connectEnd, '#f59e0b');
+    push('SSL/TLS', timing.sslStart, timing.sslEnd, '#8b5cf6');
+    push('Send', timing.sendStart, timing.sendEnd, '#10b981');
+    push('Wait (TTFB)', timing.sendEnd, timing.receiveHeadersStart, '#ef4444');
+    push('Receive', timing.receiveHeadersStart, timing.receiveHeadersEnd, '#ec4899');
+
+    if (phases.length === 0) return '<span class="net-detail-empty">No timing data</span>';
+
+    const total = phases.reduce((sum, p) => sum + parseFloat(p.duration), 0);
+    let html = '<div class="net-timing-waterfall">';
+    for (const p of phases) {
+      const pct = total > 0 ? (parseFloat(p.duration) / total * 100) : 0;
+      html += `<div class="net-timing-row">`;
+      html += `<span class="net-timing-label">${p.label}</span>`;
+      html += `<div class="net-timing-bar-wrap"><div class="net-timing-bar" style="width:${Math.max(pct, 2)}%;background:${p.color}"></div></div>`;
+      html += `<span class="net-timing-dur">${p.duration} ms</span>`;
+      html += `</div>`;
+    }
+    html += `<div class="net-timing-total">Total: ${total.toFixed(1)} ms</div>`;
+    html += '</div>';
+    return html;
   }
 
   /** Render Scripts tab: expandable rows, preview, view source locally, download. */

@@ -53,15 +53,41 @@ export class Analyzer {
       let isThirdParty = false;
       try { isThirdParty = new URL(reqUrl).hostname !== originalHost; } catch {}
 
+      let reqHeaders = {};
+      try { reqHeaders = request.headers() || {}; } catch {}
+      let postData = null;
+      try { postData = request.postData() || null; } catch {}
+
+      let initiator = null;
+      try {
+        const init = request.initiator?.() || request._initiator;
+        if (init) initiator = { type: init.type || null, url: init.url || null, lineNumber: init.lineNumber ?? null };
+      } catch {}
+
       networkRequests.push({
         url: reqUrl,
         method: request.method(),
+        resource_type: request.resourceType() || null,
+        is_navigation: request.isNavigationRequest() || false,
         status: null,
+        status_text: null,
         content_type: null,
         size: null,
+        response_size: null,
         remote_ip: null,
+        remote_port: null,
         is_third_party: isThirdParty,
+        from_cache: false,
+        from_service_worker: false,
         timestamp: Date.now(),
+        request_headers: reqHeaders,
+        request_body: postData,
+        response_headers: null,
+        timing: null,
+        security_details: null,
+        initiator,
+        failure: null,
+        _request: request,
       });
     };
 
@@ -97,15 +123,59 @@ export class Analyzer {
       const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
       if (existing) {
         existing.status = status;
-        existing.content_type = response.headers()['content-type'] || null;
+        try { existing.status_text = response.statusText() || null; } catch { existing.status_text = null; }
+
+        const respHeaders = response.headers() || {};
+        existing.content_type = respHeaders['content-type'] || null;
+        existing.response_headers = respHeaders;
+
+        const contentLength = parseInt(respHeaders['content-length'], 10);
+        if (!isNaN(contentLength)) existing.response_size = contentLength;
 
         const remote = response.remoteAddress();
         existing.remote_ip = remote?.ip || null;
+        existing.remote_port = remote?.port || null;
 
+        try { existing.from_cache = response.fromCache() || false; } catch { existing.from_cache = false; }
+        try { existing.from_service_worker = response.fromServiceWorker() || false; } catch { existing.from_service_worker = false; }
+
+        try {
+          const timing = response.timing();
+          if (timing) {
+            existing.timing = {
+              requestTime: timing.requestTime ?? null,
+              dnsStart: timing.dnsStart ?? null,
+              dnsEnd: timing.dnsEnd ?? null,
+              connectStart: timing.connectStart ?? null,
+              connectEnd: timing.connectEnd ?? null,
+              sslStart: timing.sslStart ?? null,
+              sslEnd: timing.sslEnd ?? null,
+              sendStart: timing.sendStart ?? null,
+              sendEnd: timing.sendEnd ?? null,
+              receiveHeadersStart: timing.receiveHeadersStart ?? null,
+              receiveHeadersEnd: timing.receiveHeadersEnd ?? null,
+            };
+          }
+        } catch {}
+
+        try {
+          const sec = response.securityDetails();
+          if (sec) {
+            existing.security_details = {
+              protocol: sec.protocol?.() ?? sec.protocol ?? null,
+              issuer: sec.issuer?.() ?? sec.issuer ?? null,
+              subjectName: sec.subjectName?.() ?? sec.subjectName ?? null,
+              validFrom: sec.validFrom?.() ?? sec.validFrom ?? null,
+              validTo: sec.validTo?.() ?? sec.validTo ?? null,
+            };
+          }
+        } catch {}
+
+        const { _request, ...serializable } = existing;
         sendEvent({
           type: 'network_request_captured',
           analysis_id: analysisId,
-          request: { ...existing },
+          request: serializable,
         });
 
         const ct = existing.content_type || '';
@@ -143,6 +213,23 @@ export class Analyzer {
       }
     };
 
+    const requestFailedHandler = (request) => {
+      if (state.aborted) return;
+      const reqUrl = request.url();
+      const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
+      if (existing) {
+        const failInfo = request.failure();
+        existing.failure = failInfo?.errorText || 'unknown';
+        existing.status_text = 'Failed';
+        const { _request, ...serializable } = existing;
+        sendEvent({
+          type: 'network_request_captured',
+          analysis_id: analysisId,
+          request: serializable,
+        });
+      }
+    };
+
     const consoleHandler = (msg) => {
       if (state.aborted) return;
       const log = { level: msg.type(), text: msg.text(), timestamp: Date.now() };
@@ -152,10 +239,12 @@ export class Analyzer {
 
     page.on('request', requestHandler);
     page.on('response', responseHandler);
+    page.on('requestfailed', requestFailedHandler);
     page.on('console', consoleHandler);
 
     state.requestHandler = requestHandler;
     state.responseHandler = responseHandler;
+    state.requestFailedHandler = requestFailedHandler;
     state.consoleHandler = consoleHandler;
     this.activeAnalyses.set(analysisId, state);
 
@@ -390,6 +479,7 @@ export class Analyzer {
         if (session?.page && !session.page.isClosed()) {
           session.page.off('request', state.requestHandler);
           session.page.off('response', state.responseHandler);
+          session.page.off('requestfailed', state.requestFailedHandler);
           session.page.off('console', state.consoleHandler);
         }
       } catch (err) {
@@ -528,7 +618,7 @@ export class Analyzer {
         final_url: finalUrl,
         page_title: title,
         redirect_chain: state.redirectChain,
-        network_requests: state.networkRequests,
+        network_requests: state.networkRequests.map(r => { const { _request, ...rest } = r; return rest; }),
         scripts: allScripts,
         console_logs: state.consoleLogs,
         clipboard_reads: state.clipboardReads,

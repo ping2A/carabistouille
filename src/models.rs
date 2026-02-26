@@ -88,17 +88,45 @@ pub struct RedirectEntry {
     pub status: u16,
 }
 
-/// One captured network request (URL, method, status, content-type, third-party flag, timestamp).
+/// One captured network request with full request/response metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkRequest {
     pub url: String,
     pub method: String,
+    #[serde(default)]
+    pub resource_type: Option<String>,
+    #[serde(default)]
+    pub is_navigation: bool,
     pub status: Option<u16>,
+    #[serde(default)]
+    pub status_text: Option<String>,
     pub content_type: Option<String>,
     pub size: Option<u64>,
+    #[serde(default)]
+    pub response_size: Option<u64>,
     pub remote_ip: Option<String>,
+    #[serde(default)]
+    pub remote_port: Option<u16>,
     pub is_third_party: bool,
+    #[serde(default)]
+    pub from_cache: bool,
+    #[serde(default)]
+    pub from_service_worker: bool,
     pub timestamp: f64,
+    #[serde(default)]
+    pub request_headers: Option<serde_json::Value>,
+    #[serde(default)]
+    pub request_body: Option<String>,
+    #[serde(default)]
+    pub response_headers: Option<serde_json::Value>,
+    #[serde(default)]
+    pub timing: Option<serde_json::Value>,
+    #[serde(default)]
+    pub security_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub initiator: Option<serde_json::Value>,
+    #[serde(default)]
+    pub failure: Option<String>,
 }
 
 /// Script metadata and optional full source (URL or inline, size, content, timestamp).
