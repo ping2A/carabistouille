@@ -142,7 +142,17 @@
           <div id="panel-console-list" class="panel-list"><div class="panel-empty" data-i18n="app.noConsole">No console output</div></div>
         </div>
         <div class="tab-panel" id="panel-raw">
-          <div class="panel-search"><input type="text" id="search-raw" class="search-input" data-i18n-placeholder="app.filterFiles" placeholder="Filter files..."></div>
+          <div class="panel-search">
+            <input type="text" id="search-raw" class="search-input" data-i18n-placeholder="app.filterFiles" placeholder="Filter files...">
+            <div class="raw-extension-filters" id="raw-extension-filters" aria-label="Filter by extension">
+              <label class="raw-ext-check"><input type="checkbox" id="raw-ext-js" value="js"> <span>JS</span></label>
+              <label class="raw-ext-check"><input type="checkbox" id="raw-ext-html" value="html"> <span>HTML</span></label>
+              <label class="raw-ext-check"><input type="checkbox" id="raw-ext-css" value="css"> <span>CSS</span></label>
+              <label class="raw-ext-check"><input type="checkbox" id="raw-ext-json" value="json"> <span>JSON</span></label>
+              <label class="raw-ext-check"><input type="checkbox" id="raw-ext-xml" value="xml"> <span>XML</span></label>
+              <label class="raw-ext-check"><input type="checkbox" id="raw-ext-svg" value="svg"> <span>SVG</span></label>
+            </div>
+          </div>
           <div id="panel-raw-list" class="panel-list"><div class="panel-empty" data-i18n="app.noFiles">No files captured yet</div></div>
         </div>
         <div class="tab-panel" id="panel-screenshots">

@@ -38,11 +38,20 @@ export class BrowserManager {
       console.log(`[browser] User-Agent set for ${analysisId}: ${uaPreview}`);
     }
 
-    await page.setViewport({ width: this.viewportWidth, height: this.viewportHeight });
+    await page.setViewport({
+      width: this.viewportWidth,
+      height: this.viewportHeight,
+      deviceScaleFactor: 1,
+    });
+
+    // Anti-detection: request headers consistent with a real browser (Accept-Language matches navigator.languages)
+    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
     if (config.browser.bypassCSP) {
       await page.setBypassCSP(true);
     }
+
+    await this.installStealthPatches(page);
 
     this.sessions.set(analysisId, { browser, page, proxy });
     console.log(`[browser] Session created for ${analysisId} (proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
@@ -117,6 +126,155 @@ export class BrowserManager {
   async keyPress(analysisId, key) {
     const page = await this.getPage(analysisId);
     await page.keyboard.press(key);
+  }
+
+  /**
+   * Inject stealth patches before any page script runs to evade headless Chrome detection.
+   * Covers: navigator.webdriver, plugins, languages, chrome runtime, Permissions, WebGL, screen, vendor, document artifacts.
+   */
+  async installStealthPatches(page) {
+    const viewportWidth = this.viewportWidth;
+    const viewportHeight = this.viewportHeight;
+    await page.evaluateOnNewDocument((vw, vh) => {
+      // 1. Remove navigator.webdriver flag (most common detection)
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+
+      // 2. Fake navigator.plugins (headless has 0 plugins)
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => {
+          const plugins = [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+          ];
+          plugins.length = 3;
+          return plugins;
+        },
+      });
+
+      // 3. Fake navigator.languages (headless may have empty array)
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
+
+      // 4. navigator.vendor / pdfViewerEnabled / maxTouchPoints (Chrome desktop)
+      Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
+      Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true });
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+
+      // 5. navigator.platform (match common Chrome desktop; headless often reports "Linux")
+      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+
+      // 6. Realistic screen dimensions (headless can report 0 or odd values)
+      const screenOverrides = {
+        width: 1920,
+        height: 1080,
+        availWidth: 1920,
+        availHeight: 1040,
+        colorDepth: 24,
+        pixelDepth: 24,
+      };
+      Object.keys(screenOverrides).forEach((k) => {
+        try {
+          if (Object.getOwnPropertyDescriptor(screen, k)?.writable !== false) {
+            Object.defineProperty(screen, k, { get: () => screenOverrides[k], configurable: true });
+          }
+        } catch (_) {}
+      });
+
+      // 7. Remove automation artifacts on document (Selenium, CDP, etc.)
+      const artifactPrefixes = ['$cdc_', '__webdriver_', '__driver_', '__selenium_', '__fxdriver_', '__nightmare_', '_Selenium_IDE_', '_WEBDRIVER_ELEM_CACHE_', 'callSelenium_', '__$webdriverAsyncExecutor_', '__lastWatirAlert_', '__lastWatirConfirm_', '__lastWatirPrompt_', 'webdriver'];
+      artifactPrefixes.forEach((prefix) => {
+        Object.keys(document).forEach((key) => {
+          if (key.indexOf(prefix) === 0 || key.toLowerCase().indexOf(prefix.toLowerCase()) === 0) {
+            try {
+              delete document[key];
+            } catch (_) {}
+          }
+        });
+      });
+
+      // 8. Ensure window.chrome exists with runtime stub
+      if (!window.chrome) {
+        window.chrome = {};
+      }
+      if (!window.chrome.runtime) {
+        window.chrome.runtime = {
+          PlatformOs: { MAC: 'mac', WIN: 'win', ANDROID: 'android', CROS: 'cros', LINUX: 'linux', OPENBSD: 'openbsd' },
+          PlatformArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+          PlatformNaclArch: { ARM: 'arm', X86_32: 'x86-32', X86_64: 'x86-64', MIPS: 'mips', MIPS64: 'mips64' },
+          RequestUpdateCheckStatus: { THROTTLED: 'throttled', NO_UPDATE: 'no_update', UPDATE_AVAILABLE: 'update_available' },
+          OnInstalledReason: { INSTALL: 'install', UPDATE: 'update', CHROME_UPDATE: 'chrome_update', SHARED_MODULE_UPDATE: 'shared_module_update' },
+          OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+          connect: function () { return { onDisconnect: { addListener: function () {} }, onMessage: { addListener: function () {} } }; },
+          sendMessage: function () {},
+        };
+      }
+
+      // 9. Fake Permissions.query for "notifications" (headless returns "denied" immediately)
+      const origQuery = window.Permissions?.prototype?.query;
+      if (origQuery) {
+        window.Permissions.prototype.query = function (parameters) {
+          if (parameters.name === 'notifications') {
+            return Promise.resolve({ state: Notification.permission });
+          }
+          return origQuery.call(this, parameters);
+        };
+      }
+
+      // 10. Fake WebGL vendor and renderer (headless often shows "Google Inc." / "ANGLE")
+      const getParameter = WebGLRenderingContext.prototype.getParameter;
+      WebGLRenderingContext.prototype.getParameter = function (param) {
+        if (param === 37445) return 'Intel Inc.';
+        if (param === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter.call(this, param);
+      };
+      const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+      WebGL2RenderingContext.prototype.getParameter = function (param) {
+        if (param === 37445) return 'Intel Inc.';
+        if (param === 37446) return 'Intel Iris OpenGL Engine';
+        return getParameter2.call(this, param);
+      };
+
+      // 11. Fix missing connection property (headless may have undefined)
+      if (navigator.connection === undefined) {
+        Object.defineProperty(navigator, 'connection', {
+          get: () => ({
+            effectiveType: '4g',
+            rtt: 50,
+            downlink: 10,
+            saveData: false,
+          }),
+        });
+      }
+
+      // 12. Ensure navigator.hardwareConcurrency reports a realistic value
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+
+      // 13. Ensure navigator.deviceMemory reports a realistic value
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+
+      // 14. Notification.permission (some scripts expect "default" or "denied", not undefined)
+      if (typeof Notification !== 'undefined' && (Notification.permission === undefined || Notification.permission === null)) {
+        Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true });
+      }
+
+      // 15. Patch iframe contentWindow.chrome for cross-frame detection
+      const origCreateElement = document.createElement.bind(document);
+      document.createElement = function (...args) {
+        const el = origCreateElement(...args);
+        if (args[0]?.toLowerCase() === 'iframe') {
+          const origContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+          Object.defineProperty(el, 'contentWindow', {
+            get: function () {
+              const w = origContentWindow.get.call(this);
+              if (w && !w.chrome) w.chrome = window.chrome;
+              return w;
+            },
+          });
+        }
+        return el;
+      };
+    }, viewportWidth, viewportHeight);
   }
 
   /**

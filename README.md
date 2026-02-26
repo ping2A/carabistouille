@@ -277,6 +277,83 @@ curl -X POST http://localhost:3000/api/analyses \
 
 The agent applies the User-Agent with `page.setUserAgent()` before navigating to the URL.
 
+## Headless Chrome Detection Evasion (Reference)
+
+Some sites try to detect headless browsers. This section documents common detection mechanisms and how the agent mitigates them.
+
+### Active Detection Mechanisms (Common in the Wild)
+
+**1. Media query support test**
+
+```javascript
+const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+```
+
+- Older headless Chrome (pre-2019) didn’t properly support `prefers-color-scheme` and could return `false` or `undefined`.
+- **Mitigation:** The agent uses the Chromium flag `--force-prefers-color-scheme=dark` so the media query matches.
+
+**2. Cookie persistence**
+
+```javascript
+const oldTheme = document.cookie.split('; ').find(row => row.startsWith('theme='));
+if (!oldTheme || oldTheme.split('=')[1] !== currentTheme) { window.location.href = "/"; }
+```
+
+- Headless setups that don’t persist cookies between requests fail this check.
+- **Mitigation:** Puppeteer’s default behavior persists cookies; no extra config needed.
+
+**3. Media query change listener**
+
+```javascript
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ...);
+```
+
+- Basic headless Chrome may not fire these events.
+- **Mitigation:** New headless mode (`headless: 'new'`) and `--force-prefers-color-scheme` give realistic behavior.
+
+### Common Detection Methods (Often Checked)
+
+| Check | What it catches | Agent mitigation |
+|-------|-----------------|------------------|
+| `navigator.webdriver === true` | Selenium/WebDriver flag | `--disable-blink-features=AutomationControlled` + injected patch setting `navigator.webdriver` to `false` |
+| `window.chrome === undefined` | Chrome-specific object missing | Injected `window.chrome` and `chrome.runtime` stub |
+| `navigator.plugins.length === 0` | Headless has no plugins | Injected fake plugins (e.g. Chrome PDF Plugin, PDF Viewer, Native Client) |
+| `navigator.languages === []` | Empty language array | Injected `['en-US', 'en']` |
+| WebGL vendor/renderer | “Google Inc.” / “ANGLE” fingerprint | Injected “Intel Inc.” / “Intel Iris OpenGL Engine” |
+| `navigator.hardwareConcurrency` | Often 1–2 in headless | Injected value 8 |
+| `navigator.deviceMemory` | Low or undefined | Injected value 8 |
+| `navigator.connection` | Undefined in headless | Injected `effectiveType: '4g'`, `rtt: 50`, etc. |
+| `navigator.vendor` / `pdfViewerEnabled` | Missing or wrong | Injected `Google Inc.` and `true` |
+| `navigator.platform` | “Linux” in headless | Injected `Win32` (desktop Chrome) |
+| `navigator.maxTouchPoints` | Missing or wrong | Injected `0` (desktop) |
+| `screen.width` / `colorDepth` | 0 or odd values | Injected 1920×1080, colorDepth 24 |
+| `document.$cdc_*` / `__webdriver_*` | Selenium/CDP artifacts | Injected script deletes known automation property names |
+| `Notification.permission` | Undefined | Injected `default` |
+| Request headers | Missing `Accept-Language` | `page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' })` |
+
+### What the Agent Does
+
+- **Config (`agent/config.js`):** `headless: 'new'`, `--disable-blink-features=AutomationControlled`, `--force-prefers-color-scheme=dark`, `--disable-infobars`, `--lang=en-US`.
+- **Request headers:** `page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' })` so requests match a real browser.
+- **Stealth patches (`agent/src/browser.js`):** Injected via `evaluateOnNewDocument` before any page script runs: `navigator.webdriver`, `navigator.plugins`, `navigator.languages`, `navigator.vendor`, `navigator.pdfViewerEnabled`, `navigator.maxTouchPoints`, `navigator.platform`, `screen` dimensions/colorDepth, removal of `document.$cdc_*` / `__webdriver_*` etc., `window.chrome.runtime`, WebGL `getParameter`, `navigator.connection`, `hardwareConcurrency`, `deviceMemory`, `Notification.permission`, and iframe `contentWindow.chrome`.
+
+### What This Does *Not* Cover
+
+- **Server-side detection** — IP, request patterns, TLS fingerprinting, rate limits. Use a proxy or different network if needed.
+- **Advanced fingerprinting** — Canvas/WebGL hashes, audio context, font enumeration. The agent only patches the most common checks above.
+- **CAPTCHAs and behavioral checks** — Not addressed; real user interaction may still be required.
+
+### Typical Detection Flow (Example)
+
+```
+1. First visit → Set theme cookie from media query
+2. Page reload → Check cookie exists and matches
+3. If mismatch → Redirect (bot suspected)
+4. Monitor media query changes → Redirect if triggered incorrectly
+```
+
+With the agent’s flags and stealth patches, this kind of flow is much less likely to flag the browser as headless. Stronger or custom detection may still apply.
+
 ## Features
 
 ### Core Analysis
@@ -440,6 +517,16 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 ```
 
 ## Configuration
+
+### Command-line flags
+
+| Flag | Description |
+|------|-------------|
+| `--clean-db` | Delete the SQLite database file before starting (path from `DATABASE_PATH`). Server then starts with an empty analyses list and recreates the DB on first write. |
+
+Example: `cargo run -- --clean-db` or `./carabistouille --clean-db`.
+
+### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|

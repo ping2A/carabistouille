@@ -12,16 +12,15 @@ const config = {
   },
 
   browser: {
-    // 'shell' = old headless (more permissive, bypasses most blocking)
-    // true    = new headless (Chrome for Testing)
+    // 'new' = new headless (Chrome for Testing, realistic fingerprint)
+    // 'shell' = old headless (legacy, easily fingerprinted)
     // false   = headed (visible browser window, useful for debugging)
-    headless: 'shell',
+    headless: 'new',
 
     viewportWidth: 1280,
     viewportHeight: 800,
 
     // Chromium flags applied to every launched instance.
-    // Add or remove entries to tweak behaviour.
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
@@ -40,6 +39,20 @@ const config = {
       '--ignore-certificate-errors',
       '--ignore-certificate-errors-spki-list',
       '--allow-running-insecure-content',
+
+      // Anti-detection: remove automation indicators
+      '--disable-blink-features=AutomationControlled',
+      '--force-prefers-color-scheme=dark',
+
+      // Anti-detection: mimic real browser window/screen properties
+      '--window-position=0,0',
+      '--enable-features=NetworkService,NetworkServiceInProcess',
+
+      // Anti-detection: remove "Chrome is being controlled by automated test software" bar
+      '--disable-infobars',
+
+      // Anti-detection: consistent locale (matches Accept-Language and navigator.language)
+      '--lang=en-US',
     ],
 
     // Accept invalid / self-signed TLS certificates

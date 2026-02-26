@@ -153,6 +153,9 @@ class App {
     document.getElementById('search-scripts').addEventListener('input', () => this.renderScriptsPanel());
     document.getElementById('search-console').addEventListener('input', () => this.renderConsolePanel());
     document.getElementById('search-raw').addEventListener('input', () => this.renderRawPanel());
+    document.querySelectorAll('#raw-extension-filters input[type="checkbox"]').forEach(cb => {
+      cb.addEventListener('change', () => this.renderRawPanel());
+    });
 
     this.viewportImg.addEventListener('click', (e) => this.handleViewportClick(e));
     this.viewportImg.addEventListener('wheel', (e) => this.handleViewportScroll(e), { passive: false });
@@ -921,6 +924,13 @@ class App {
       .join('');
   }
 
+  /** Return array of selected extension filters for the Raw tab (e.g. ['js', 'html']). Empty = show all. */
+  getRawExtensionFilters() {
+    const el = document.getElementById('raw-extension-filters');
+    if (!el) return [];
+    return Array.from(el.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+  }
+
   /** Render Raw tab: page source, DOM snapshot (at finish), and captured raw files; expand, copy, download, view source. */
   renderRawPanel() {
     const list = document.getElementById('panel-raw-list');
@@ -933,10 +943,27 @@ class App {
     }
 
     const query = (document.getElementById('search-raw')?.value || '').toLowerCase();
+    const selectedExts = this.getRawExtensionFilters();
 
-    // Page Source pinned entry
+    const matchExtension = (url, contentType, ext) => {
+      const u = (url || '').toLowerCase();
+      const ct = (contentType || '').toLowerCase();
+      switch (ext) {
+        case 'js': return u.endsWith('.js') || ct.includes('javascript');
+        case 'html': return u.endsWith('.html') || u.endsWith('.htm') || ct.includes('html');
+        case 'css': return u.endsWith('.css') || ct.includes('css');
+        case 'json': return u.endsWith('.json') || ct.includes('json');
+        case 'xml': return u.endsWith('.xml') || ct.includes('xml');
+        case 'svg': return u.endsWith('.svg') || ct.includes('svg');
+        default: return false;
+      }
+    };
+
+    const showByExtension = (ext) => !selectedExts.length || selectedExts.includes(ext);
+
+    // Page Source pinned entry (counts as HTML)
     let pageSourceHtml = '';
-    if (this.pageSource && (!query || 'page source'.includes(query) || 'html'.includes(query))) {
+    if (this.pageSource && showByExtension('html') && (!query || 'page source'.includes(query) || 'html'.includes(query))) {
       const preview = this.pageSource.trim().substring(0, 150);
       const sizeKb = (this.pageSource.length / 1024).toFixed(1);
       pageSourceHtml = `
@@ -965,9 +992,9 @@ class App {
         </div>`;
     }
 
-    // DOM snapshot (at finish) pinned entry
+    // DOM snapshot (at finish) pinned entry (counts as HTML)
     let domSnapshotHtml = '';
-    if (this.domSnapshot && (!query || 'dom snapshot'.includes(query) || 'html'.includes(query))) {
+    if (this.domSnapshot && showByExtension('html') && (!query || 'dom snapshot'.includes(query) || 'html'.includes(query))) {
       const preview = this.domSnapshot.trim().substring(0, 150);
       const sizeKb = (this.domSnapshot.length / 1024).toFixed(1);
       domSnapshotHtml = `
@@ -990,12 +1017,17 @@ class App {
         </div>`;
     }
 
-    const filtered = query
-      ? this.rawFiles.filter(f => f.url.toLowerCase().includes(query) || (f.content_type || '').toLowerCase().includes(query))
-      : this.rawFiles;
+    let filtered = this.rawFiles;
+    if (selectedExts.length) {
+      filtered = filtered.filter(f => selectedExts.some(ext => matchExtension(f.url, f.content_type, ext)));
+    }
+    if (query) {
+      filtered = filtered.filter(f => f.url.toLowerCase().includes(query) || (f.content_type || '').toLowerCase().includes(query));
+    }
 
     list.innerHTML = pageSourceHtml + domSnapshotHtml + filtered
-      .map((f, i) => {
+      .map((f) => {
+        const origIdx = this.rawFiles.indexOf(f);
         const timeLabel = this._timeLabel(f.timestamp);
         const absTime = this._absTime(f.timestamp);
         const relTime = this._relTime(f.timestamp);
@@ -1006,7 +1038,7 @@ class App {
         let shortName;
         try { shortName = new URL(f.url).pathname.split('/').pop() || f.url; } catch { shortName = f.url; }
         return `
-        <div class="raw-entry" data-raw-idx="${i}">
+        <div class="raw-entry" data-raw-idx="${origIdx}">
           <div class="raw-row">
             <div class="raw-header">
               <span class="expand-arrow">&#9654;</span>
@@ -1017,13 +1049,13 @@ class App {
                 <button class="icon-btn copy-url-btn" data-url="${this.esc(f.url)}" title="Copy URL">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
-                <button class="icon-btn copy-content-btn" data-raw-idx="${i}" title="Copy content">
+                <button class="icon-btn copy-content-btn" data-raw-idx="${origIdx}" title="Copy content">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                 </button>
-                <button class="icon-btn dl-btn" data-raw-idx="${i}" title="Download file">
+                <button class="icon-btn dl-btn" data-raw-idx="${origIdx}" title="Download file">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 </button>
-                <button class="icon-btn view-src-btn" data-raw-idx="${i}" title="Open in full viewer">
+                <button class="icon-btn view-src-btn" data-raw-idx="${origIdx}" title="Open in full viewer">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M10 14L21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>
                 </button>
               </span>

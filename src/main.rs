@@ -6,6 +6,11 @@ use std::path::PathBuf;
 use carabistouille::{build_router, AppState};
 use tracing_subscriber::EnvFilter;
 
+/// Check for `--clean-db` in the command-line arguments.
+fn clean_db_requested() -> bool {
+    std::env::args().any(|a| a == "--clean-db")
+}
+
 /// Resolve TLS configuration from environment variables.
 ///
 /// Priority:
@@ -64,6 +69,18 @@ async fn main() {
     let db_path: PathBuf = std::env::var("DATABASE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("carabistouille.db"));
+
+    if clean_db_requested() {
+        if db_path.exists() {
+            if let Err(e) = std::fs::remove_file(&db_path) {
+                tracing::warn!("Could not remove database {:?}: {}", db_path, e);
+            } else {
+                tracing::info!("Database cleaned: {:?} removed", db_path);
+            }
+        } else {
+            tracing::info!("Database clean requested but {:?} does not exist", db_path);
+        }
+    }
 
     let analyses = carabistouille::db::load_analyses(&db_path)
         .unwrap_or_else(|e| {
