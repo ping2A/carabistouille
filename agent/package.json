@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "start:plain": "BROWSER_ENGINE=puppeteer node src/index.js"
   },
   "dependencies": {
     "puppeteer": "^24.0.0",

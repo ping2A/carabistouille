@@ -62,6 +62,7 @@ pub async fn create_analysis(
         report: None,
         screenshot: None,
         screenshot_timeline: Vec::new(),
+        last_screenshot_forward_time_ms: None,
     };
 
     state.analyses.insert(id.clone(), analysis.clone());

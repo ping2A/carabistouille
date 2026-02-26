@@ -96,6 +96,7 @@ pub fn load_analyses(path: &Path) -> rusqlite::Result<Vec<Analysis>> {
             report,
             screenshot,
             screenshot_timeline,
+            last_screenshot_forward_time_ms: None,
         })
     })?;
     let mut out = Vec::new();

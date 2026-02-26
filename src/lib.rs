@@ -2,6 +2,7 @@
 
 mod api;
 pub mod db;
+pub mod docker;
 pub mod models;
 mod protocol;
 mod state;

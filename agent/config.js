@@ -18,8 +18,9 @@ const config = {
     headless: 'new',
 
     // Browser engine to use:
-    //   'puppeteer'       — plain Puppeteer + manual stealth patches (original behaviour)
-    //   'puppeteer-extra'  — puppeteer-extra with stealth plugin (community evasions)
+    //   'puppeteer'       — plain Puppeteer + manual stealth patches (faster, easier to debug)
+    //   'puppeteer-extra' — puppeteer-extra with stealth plugin (community evasions)
+    // To test without the plugin: BROWSER_ENGINE=puppeteer npm start
     engine: process.env.BROWSER_ENGINE || 'puppeteer-extra',
 
     viewportWidth: 1280,

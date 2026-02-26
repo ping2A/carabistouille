@@ -57,27 +57,30 @@ async fn handle_agent_connection(socket: WebSocket, state: AppState) {
     });
 
     while let Some(Ok(msg)) = ws_rx.next().await {
-        if let Message::Text(text) = msg {
-            let text_len = text.len();
-            match serde_json::from_str::<AgentEvent>(&text) {
-                Ok(event) => {
-                    tracing::debug!(
-                        "<- Agent: {} ({} bytes)",
-                        event.type_name(),
-                        text_len
-                    );
-                    handle_agent_event(&state, event).await;
-                }
-                Err(_) => {
-                    if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(analysis_id) = raw.get("analysis_id").and_then(|v| v.as_str()) {
-                            let event_type = raw.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
-                            tracing::debug!("<- Agent (raw): {} for {} ({} bytes)", event_type, analysis_id, text_len);
-                            forward_raw_to_viewer(&state, analysis_id, &text);
+        match msg {
+            Message::Text(text) => {
+                let text_len = text.len();
+                match serde_json::from_str::<AgentEvent>(&text) {
+                    Ok(event) => {
+                        tracing::debug!(
+                            "<- Agent: {} ({} bytes)",
+                            event.type_name(),
+                            text_len
+                        );
+                        handle_agent_event(&state, event).await;
+                    }
+                    Err(_) => {
+                        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(analysis_id) = raw.get("analysis_id").and_then(|v| v.as_str()) {
+                                let event_type = raw.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                                tracing::debug!("<- Agent (raw): {} for {} ({} bytes)", event_type, analysis_id, text_len);
+                                forward_raw_to_viewer(&state, analysis_id, &text);
+                            }
                         }
                     }
                 }
             }
+            _ => {}
         }
     }
 
@@ -97,26 +100,34 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 analysis_id,
                 data.len() / 1024
             );
-            if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+            let now_ms = chrono::Utc::now().timestamp_millis() as f64;
+            let should_forward = if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
                 analysis.screenshot = Some(data.clone());
                 if analysis.status == AnalysisStatus::Pending {
                     analysis.status = AnalysisStatus::Running;
                 }
-
-                // Sample into timeline (~every 3s)
-                let now = chrono::Utc::now().timestamp_millis() as f64;
                 let should_sample = analysis.screenshot_timeline.is_empty()
-                    || (now - analysis.screenshot_timeline.last().unwrap().timestamp) >= 3000.0;
+                    || (now_ms - analysis.screenshot_timeline.last().unwrap().timestamp) >= 3000.0;
                 if should_sample {
                     analysis.screenshot_timeline.push(crate::models::ScreenshotEntry {
                         data: data.clone(),
-                        timestamp: now,
+                        timestamp: now_ms,
                     });
                 }
+                let last = analysis.last_screenshot_forward_time_ms;
+                let ok = last.is_none()
+                    || (now_ms - last.unwrap_or(0.0)) >= SCREENSHOT_FORWARD_INTERVAL_MS;
+                if ok {
+                    analysis.last_screenshot_forward_time_ms = Some(now_ms);
+                }
+                ok
             } else {
                 tracing::warn!("Screenshot for unknown analysis {}", analysis_id);
+                false
+            };
+            if should_forward {
+                forward_to_viewer(state, analysis_id, &event);
             }
-            forward_to_viewer(state, analysis_id, &event);
         }
 
         AgentEvent::NetworkRequestCaptured {
@@ -189,7 +200,14 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 let report = analysis.report.get_or_insert_with(Default::default);
                 report.scripts.push(script.clone());
             }
-            forward_to_viewer(state, analysis_id, &event);
+            // Forward a lightweight version without the full script content
+            let mut light = script.clone();
+            light.content = None;
+            let light_event = AgentEvent::ScriptLoaded {
+                analysis_id: analysis_id.clone(),
+                script: light,
+            };
+            forward_to_viewer(state, analysis_id, &light_event);
         }
 
         AgentEvent::NavigationComplete {
@@ -278,7 +296,8 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 let report = analysis.report.get_or_insert_with(Default::default);
                 report.raw_files.push(file.clone());
             }
-            forward_to_viewer(state, analysis_id, &event);
+            // Don't forward raw file content to viewers — too large (100KB+).
+            // Viewer gets the full data via report_snapshot or analysis_complete.
         }
 
         AgentEvent::PageSourceCaptured { analysis_id, html } => {
@@ -291,7 +310,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 let report = analysis.report.get_or_insert_with(Default::default);
                 report.page_source = Some(html.clone());
             }
-            forward_to_viewer(state, analysis_id, &event);
+            // Don't forward page source to viewers in real-time — too large.
         }
 
         AgentEvent::StorageCaptured { analysis_id, capture } => {
@@ -324,7 +343,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 let report = analysis.report.get_or_insert_with(Default::default);
                 report.dom_snapshot = Some(html.clone());
             }
-            forward_to_viewer(state, analysis_id, &event);
+            // Don't forward DOM snapshot to viewers in real-time — too large.
         }
 
         AgentEvent::ClipboardCaptured { analysis_id, read } => {
@@ -382,6 +401,9 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
         }
     }
 }
+
+/// Minimum interval (ms) between forwarding screenshots to viewers to avoid flooding the channel.
+const SCREENSHOT_FORWARD_INTERVAL_MS: f64 = 1000.0;
 
 /// Serialize the event and send it to all viewers subscribed to this analysis.
 fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {

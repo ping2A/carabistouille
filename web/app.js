@@ -445,7 +445,9 @@ class App {
       if (analysis.screenshot && (analysis.status === 'complete' || analysis.status === 'error')) {
         this.viewportPlaceholder.style.display = 'none';
         this.viewportImg.style.display = 'block';
-        this.viewportImg.src = `data:image/jpeg;base64,${analysis.screenshot}`;
+        // Detect format: WebP starts with 'UklG' in base64, JPEG with '/9j/'
+        const mime = analysis.screenshot.startsWith('UklG') ? 'image/webp' : 'image/jpeg';
+        this.viewportImg.src = `data:${mime};base64,${analysis.screenshot}`;
       }
 
       if (analysis.report) {
@@ -540,12 +542,23 @@ class App {
     switch (event.type) {
       case 'screenshot':
         this.screenshotCount++;
-        if (this.screenshotCount <= 3 || this.screenshotCount % 10 === 0) {
-          console.log(`[ui] Screenshot #${this.screenshotCount} received (${(event.data.length / 1024).toFixed(1)} KB)`);
+        if (!event.data || typeof event.data !== 'string') break;
+        if (this.screenshotCount <= 3 || this.screenshotCount % 20 === 0) {
+          console.log(`[ui] Screenshot #${this.screenshotCount} (${(event.data.length / 1024).toFixed(1)} KB)`);
         }
         this.viewportPlaceholder.style.display = 'none';
         this.viewportImg.style.display = 'block';
-        this.viewportImg.src = `data:image/jpeg;base64,${event.data}`;
+        try {
+          const bin = atob(event.data);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const blob = new Blob([bytes], { type: 'image/webp' });
+          if (this._lastScreenshotUrl) URL.revokeObjectURL(this._lastScreenshotUrl);
+          this._lastScreenshotUrl = URL.createObjectURL(blob);
+          this.viewportImg.src = this._lastScreenshotUrl;
+        } catch {
+          this.viewportImg.src = `data:image/webp;base64,${event.data}`;
+        }
         if (this.currentStatus !== 'complete' && this.currentStatus !== 'error') {
           this.updateStopButton('running');
         }
@@ -1515,7 +1528,7 @@ class App {
         const relSec = ((ss.timestamp - firstTs) / 1000).toFixed(0);
         const absTime = new Date(ss.timestamp).toLocaleTimeString();
         return `<div class="ss-thumb" data-ss-idx="${i}" title="${absTime} (+${relSec}s)">
-          <img src="data:image/jpeg;base64,${ss.data}" loading="lazy" alt="Screenshot ${i + 1}">
+          <img src="data:${ss.data.startsWith('UklG') ? 'image/webp' : 'image/jpeg'};base64,${ss.data}" loading="lazy" alt="Screenshot ${i + 1}">
           <span class="ss-label">${absTime} <span class="rel">+${relSec}s</span></span>
         </div>`;
       }).join('')
@@ -1583,7 +1596,8 @@ class App {
       const cur = parseInt(modal.dataset.currentIdx);
       const entry = this.screenshotTimeline[cur];
       if (!entry) return;
-      const blob = this._b64toBlob(entry.data, 'image/jpeg');
+      const mime = entry.data.startsWith('UklG') ? 'image/webp' : 'image/jpeg';
+      const blob = this._b64toBlob(entry.data, mime);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1606,7 +1620,8 @@ class App {
     const absTime = new Date(entry.timestamp).toLocaleTimeString();
     modal.querySelector('.ss-modal-title').textContent = `${absTime} (+${relSec}s)`;
     modal.querySelector('.ss-nav-counter').textContent = `${i + 1} / ${this.screenshotTimeline.length}`;
-    modal.querySelector('.ss-modal-img').src = `data:image/jpeg;base64,${entry.data}`;
+    const mime = entry.data.startsWith('UklG') ? 'image/webp' : 'image/jpeg';
+    modal.querySelector('.ss-modal-img').src = `data:${mime};base64,${entry.data}`;
     modal.querySelector('#ss-prev').disabled = i <= 0;
     modal.querySelector('#ss-next').disabled = i >= this.screenshotTimeline.length - 1;
     modal.dataset.currentIdx = i;

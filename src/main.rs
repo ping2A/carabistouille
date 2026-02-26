@@ -1,4 +1,4 @@
-//! Server entry point: TLS resolution, router, and HTTP/HTTPS listen loop.
+//! Server entry point: TLS resolution, router, optional Docker agent, and HTTP/HTTPS listen loop.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -6,9 +6,33 @@ use std::path::PathBuf;
 use carabistouille::{build_router, AppState};
 use tracing_subscriber::EnvFilter;
 
-/// Check for `--clean-db` in the command-line arguments.
-fn clean_db_requested() -> bool {
-    std::env::args().any(|a| a == "--clean-db")
+/// Simple CLI flag parser (avoids adding clap for a handful of flags).
+struct CliArgs {
+    clean_db: bool,
+    /// Start the agent inside a Docker container instead of expecting a local agent.
+    docker_agent: bool,
+    /// Browser engine passed into the Docker container (puppeteer | puppeteer-extra).
+    browser_engine: String,
+}
+
+fn parse_args() -> CliArgs {
+    let args: Vec<String> = std::env::args().collect();
+    let clean_db = args.iter().any(|a| a == "--clean-db");
+    let docker_agent = args.iter().any(|a| a == "--docker-agent");
+
+    let browser_engine = args
+        .iter()
+        .position(|a| a == "--browser-engine")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .or_else(|| std::env::var("BROWSER_ENGINE").ok())
+        .unwrap_or_else(|| "puppeteer-extra".to_string());
+
+    CliArgs {
+        clean_db,
+        docker_agent,
+        browser_engine,
+    }
 }
 
 /// Resolve TLS configuration from environment variables.
@@ -56,7 +80,7 @@ async fn resolve_tls_config() -> Option<axum_server::tls_rustls::RustlsConfig> {
     None
 }
 
-/// Initialize logging, build router, bind with or without TLS, and run the server.
+/// Initialize logging, build router, optionally start Docker agent, bind with or without TLS, and run the server.
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -66,11 +90,13 @@ async fn main() {
         )
         .init();
 
+    let cli = parse_args();
+
     let db_path: PathBuf = std::env::var("DATABASE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("carabistouille.db"));
 
-    if clean_db_requested() {
+    if cli.clean_db {
         if db_path.exists() {
             if let Err(e) = std::fs::remove_file(&db_path) {
                 tracing::warn!("Could not remove database {:?}: {}", db_path, e);
@@ -100,6 +126,47 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
+
+    // --- Docker agent management ---
+    let _docker_log_handle: Option<tokio::task::JoinHandle<()>> = if cli.docker_agent {
+        tracing::info!(
+            "Docker agent mode enabled (engine={})",
+            cli.browser_engine
+        );
+
+        let agent_dir = std::env::var("AGENT_DIR").unwrap_or_else(|_| "agent".to_string());
+
+        if let Err(e) = carabistouille::docker::ensure_image(&agent_dir).await {
+            tracing::error!("Failed to build Docker agent image: {}", e);
+            std::process::exit(1);
+        }
+
+        match carabistouille::docker::start_container(port, &cli.browser_engine).await {
+            Ok(_container_id) => {
+                tracing::info!("Docker agent container started — logs streaming below:");
+                Some(carabistouille::docker::stream_logs())
+            }
+            Err(e) => {
+                tracing::error!("Failed to start Docker agent container: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        tracing::info!("Local agent mode (start the agent manually or use --docker-agent)");
+        None
+    };
+
+    // Register shutdown handler to clean up the Docker container
+    let docker_agent_enabled = cli.docker_agent;
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ctrl-c");
+        if docker_agent_enabled {
+            carabistouille::docker::stop_container().await;
+        }
+        std::process::exit(0);
+    });
 
     if let Some(tls_config) = resolve_tls_config().await {
         tracing::info!("Server listening on https://{}", addr);

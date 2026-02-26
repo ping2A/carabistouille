@@ -24,6 +24,9 @@ pub struct Analysis {
     pub screenshot: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub screenshot_timeline: Vec<ScreenshotEntry>,
+    /// In-memory only: last time we forwarded a screenshot to viewers (ms since epoch). Throttles forwarding.
+    #[serde(skip)]
+    pub last_screenshot_forward_time_ms: Option<f64>,
 }
 
 /// Lifecycle state of an analysis (pending → running → complete | error).

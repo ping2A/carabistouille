@@ -55,15 +55,13 @@ class Agent {
     });
   }
 
-  /** Send a JSON-serialized event to the server (screenshot, network_request_captured, etc.). */
+  /** Send a JSON-serialized event to the server. */
   send(event) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       const json = JSON.stringify(event);
       this.ws.send(json);
       this.sendCount++;
-      if (event.type === 'screenshot') {
-        console.log(`[agent] -> screenshot for ${event.analysis_id} (${(json.length / 1024).toFixed(1)} KB, total sends: ${this.sendCount})`);
-      } else if (event.type !== 'agent_ready') {
+      if (event.type !== 'agent_ready') {
         console.log(`[agent] -> ${event.type} for ${event.analysis_id} (${json.length} bytes)`);
       }
     } else {
@@ -143,19 +141,11 @@ class Agent {
     }
   }
 
-  /** Take a screenshot for the analysis and send it as a screenshot event. */
+  /** Take a screenshot and send it as a JSON text event. */
   async sendScreenshot(analysisId) {
-    const screenshot = await this.browserManager.takeScreenshot(analysisId);
-    if (screenshot) {
-      this.send({
-        type: 'screenshot',
-        analysis_id: analysisId,
-        data: screenshot.data,
-        width: screenshot.width,
-        height: screenshot.height,
-      });
-    } else {
-      console.warn(`[agent] Failed to take screenshot for ${analysisId}`);
+    const shot = await this.browserManager.takeScreenshot(analysisId);
+    if (shot) {
+      this.send({ type: 'screenshot', analysis_id: analysisId, data: shot.data, width: shot.width, height: shot.height });
     }
   }
 }

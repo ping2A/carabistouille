@@ -108,13 +108,15 @@ export class BrowserManager {
     return session.page;
   }
 
-  /** Capture viewport as JPEG (base64); returns { data, width, height } or null on error. */
+  /** Capture viewport as base64-encoded WebP. Returns { data, width, height } or null on error. */
   async takeScreenshot(analysisId) {
     try {
       const page = await this.getPage(analysisId);
       const raw = await page.screenshot({
-        type: config.screenshots.format,
-        quality: config.screenshots.quality,
+        type: 'webp',
+        quality: 20,
+        optimizeForSpeed: true,
+        captureBeyondViewport: false,
       });
       return {
         data: Buffer.from(raw).toString('base64'),

@@ -252,25 +252,6 @@ export class Analyzer {
 
     await this.browserManager.installClipboardHooks(analysisId);
 
-    let screenshotTick = 0;
-    const screenshotInterval = setInterval(async () => {
-      if (state.aborted) return;
-      try {
-        const screenshot = await this.browserManager.takeScreenshot(analysisId);
-        if (screenshot) {
-          sendEvent({ type: 'screenshot', analysis_id: analysisId, ...screenshot });
-        }
-      } catch (err) {
-        console.error(`[analyzer] Screenshot interval error: ${err.message}`);
-      }
-      screenshotTick++;
-      if (screenshotTick % 4 === 0) {
-        this._drainAndReportClipboard(analysisId, 'poll');
-        this._drainAndReportDetection(analysisId);
-      }
-    }, 500);
-    this.screenshotIntervals.set(analysisId, screenshotInterval);
-
     try {
       await this._navigateWithRetries(page, url, state);
 
@@ -287,6 +268,36 @@ export class Analyzer {
         title,
         engine: config.browser.engine || 'puppeteer',
       });
+
+      try {
+        const shot = await this.browserManager.takeScreenshot(analysisId);
+        if (shot) {
+          console.log(`[analyzer] Sending initial screenshot (${(shot.data.length / 1024).toFixed(1)} KB base64)`);
+          sendEvent({ type: 'screenshot', analysis_id: analysisId, data: shot.data, width: shot.width, height: shot.height });
+        }
+      } catch (e) {
+        console.warn(`[analyzer] Initial screenshot: ${e.message}`);
+      }
+
+      // Start periodic screenshots only after navigation (so we don't flood with about:blank)
+      let screenshotTick = 0;
+      const screenshotInterval = setInterval(async () => {
+        if (state.aborted) return;
+        try {
+          const shot = await this.browserManager.takeScreenshot(analysisId);
+          if (shot) {
+            sendEvent({ type: 'screenshot', analysis_id: analysisId, data: shot.data, width: shot.width, height: shot.height });
+          }
+        } catch (err) {
+          console.error(`[analyzer] Screenshot interval error: ${err.message}`);
+        }
+        screenshotTick++;
+        if (screenshotTick % 2 === 0) {
+          this._drainAndReportClipboard(analysisId, 'poll');
+          this._drainAndReportDetection(analysisId);
+        }
+      }, 1500);
+      this.screenshotIntervals.set(analysisId, screenshotInterval);
 
       // Capture the rendered page HTML source
       try {
