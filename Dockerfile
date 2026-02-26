@@ -56,7 +56,7 @@ COPY agent ./
 # -----------------------------------------------------------------------------
 FROM node:20-bookworm-slim
 
-# Chromium runtime dependencies (same as agent-builder)
+# Chromium runtime dependencies + Xvfb for real (headed) Chrome when HEADLESS=false
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     chromium \
@@ -77,6 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 # Use system Chromium with Puppeteer (skip download, smaller image)

@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Start virtual display so the agent can run real (headed) Chrome when HEADLESS=false
+Xvfb :99 -screen 0 1280x800x24 -ac &
+export DISPLAY=:99
+
 # Run the Rust server in the background from /app (serves UI from ./web, DB from DATABASE_PATH)
 cd /app && /usr/local/bin/carabistouille &
 SERVER_PID=$!
