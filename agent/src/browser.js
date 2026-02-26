@@ -1,8 +1,29 @@
 /**
  * BrowserManager: one headless Chromium per analysis (session map), viewport, screenshots, input, clipboard hooks.
+ * Supports two engines via config.browser.engine:
+ *   - 'puppeteer'       : plain Puppeteer + our manual stealth patches
+ *   - 'puppeteer-extra'  : puppeteer-extra with community stealth plugin
  */
 import puppeteer from 'puppeteer';
 import config from '../config.js';
+
+let launcher = puppeteer;
+
+if (config.browser.engine === 'puppeteer-extra') {
+  try {
+    const { default: puppeteerExtra } = await import('puppeteer-extra');
+    const { default: StealthPlugin } = await import('puppeteer-extra-plugin-stealth');
+    puppeteerExtra.use(StealthPlugin());
+    launcher = puppeteerExtra;
+    console.log('[browser] Engine: puppeteer-extra + stealth plugin');
+  } catch (err) {
+    console.warn(`[browser] Failed to load puppeteer-extra, falling back to plain puppeteer: ${err.message}`);
+  }
+} else {
+  console.log('[browser] Engine: plain puppeteer (manual stealth patches)');
+}
+
+const useExtraStealth = launcher !== puppeteer;
 
 /** Manages Puppeteer browser sessions keyed by analysisId; each session has its own Chromium + page. */
 export class BrowserManager {
@@ -25,7 +46,7 @@ export class BrowserManager {
       args.push(`--proxy-server=${proxy}`);
     }
 
-    const browser = await puppeteer.launch({
+    const browser = await launcher.launch({
       headless: config.browser.headless,
       args,
       ignoreHTTPSErrors: config.browser.ignoreHTTPSErrors,
@@ -44,18 +65,25 @@ export class BrowserManager {
       deviceScaleFactor: 1,
     });
 
-    // Anti-detection: request headers consistent with a real browser (Accept-Language matches navigator.languages)
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
     if (config.browser.bypassCSP) {
       await page.setBypassCSP(true);
     }
 
-    await this.installStealthPatches(page);
+    if (useExtraStealth) {
+      // puppeteer-extra stealth plugin handles evasions automatically;
+      // still install our manual patches for gaps the plugin doesn't cover
+      // (artifact cleanup, iframe chrome stub, Notification.permission, etc.)
+      await this.installSupplementalPatches(page);
+    } else {
+      await this.installStealthPatches(page);
+    }
     await this.installDetectionMonitors(page);
 
+    const engine = useExtraStealth ? 'puppeteer-extra' : 'puppeteer';
     this.sessions.set(analysisId, { browser, page, proxy });
-    console.log(`[browser] Session created for ${analysisId} (proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
+    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
     return page;
   }
 
@@ -262,6 +290,55 @@ export class BrowserManager {
       }
 
       // 15. Patch iframe contentWindow.chrome for cross-frame detection
+      const origCreateElement = document.createElement.bind(document);
+      document.createElement = function (...args) {
+        const el = origCreateElement(...args);
+        if (args[0]?.toLowerCase() === 'iframe') {
+          const origContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+          Object.defineProperty(el, 'contentWindow', {
+            get: function () {
+              const w = origContentWindow.get.call(this);
+              if (w && !w.chrome) w.chrome = window.chrome;
+              return w;
+            },
+          });
+        }
+        return el;
+      };
+    }, viewportWidth, viewportHeight);
+  }
+
+  /**
+   * Lightweight patches applied when puppeteer-extra stealth plugin is active.
+   * Only covers gaps the plugin doesn't handle: automation artifact cleanup, realistic
+   * screen dimensions, iframe cross-frame chrome stub, and force-dark-mode preference.
+   */
+  async installSupplementalPatches(page) {
+    const viewportWidth = this.viewportWidth;
+    const viewportHeight = this.viewportHeight;
+    await page.evaluateOnNewDocument((vw, vh) => {
+      // Screen dimensions (stealth plugin doesn't override these)
+      const screenOverrides = {
+        width: 1920, height: 1080, availWidth: 1920, availHeight: 1040,
+        colorDepth: 24, pixelDepth: 24,
+      };
+      Object.keys(screenOverrides).forEach((k) => {
+        try {
+          Object.defineProperty(screen, k, { get: () => screenOverrides[k], configurable: true });
+        } catch (_) {}
+      });
+
+      // Remove automation artifacts ($cdc_, __webdriver_, etc.)
+      const artifactPrefixes = ['$cdc_', '__webdriver_', '__driver_', '__selenium_', '__fxdriver_', '__nightmare_', '_Selenium_IDE_', '_WEBDRIVER_ELEM_CACHE_', 'callSelenium_', '__$webdriverAsyncExecutor_', '__lastWatirAlert_', '__lastWatirConfirm_', '__lastWatirPrompt_', 'webdriver'];
+      artifactPrefixes.forEach((prefix) => {
+        Object.keys(document).forEach((key) => {
+          if (key.indexOf(prefix) === 0 || key.toLowerCase().indexOf(prefix.toLowerCase()) === 0) {
+            try { delete document[key]; } catch (_) {}
+          }
+        });
+      });
+
+      // Patch iframe contentWindow.chrome for cross-frame detection
       const origCreateElement = document.createElement.bind(document);
       document.createElement = function (...args) {
         const el = origCreateElement(...args);

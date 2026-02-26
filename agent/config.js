@@ -17,6 +17,11 @@ const config = {
     // false   = headed (visible browser window, useful for debugging)
     headless: 'new',
 
+    // Browser engine to use:
+    //   'puppeteer'       — plain Puppeteer + manual stealth patches (original behaviour)
+    //   'puppeteer-extra'  — puppeteer-extra with stealth plugin (community evasions)
+    engine: process.env.BROWSER_ENGINE || 'puppeteer-extra',
+
     viewportWidth: 1280,
     viewportHeight: 800,
 

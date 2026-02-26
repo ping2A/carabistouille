@@ -94,6 +94,8 @@ pub struct AnalysisReport {
     pub risk_factors: Vec<String>,
     #[serde(default)]
     pub detection_attempts: Vec<DetectionAttempt>,
+    #[serde(default)]
+    pub engine: Option<String>,
 }
 
 /// One redirect step (from URL → to URL, HTTP status).

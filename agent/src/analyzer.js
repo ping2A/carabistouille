@@ -285,6 +285,7 @@ export class Analyzer {
         analysis_id: analysisId,
         url: finalUrl,
         title,
+        engine: config.browser.engine || 'puppeteer',
       });
 
       // Capture the rendered page HTML source
@@ -640,6 +641,7 @@ export class Analyzer {
         security,
         risk_score: riskScore,
         risk_factors: riskFactors,
+        engine: config.browser.engine || 'puppeteer',
       },
     });
   }

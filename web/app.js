@@ -100,6 +100,8 @@ class App {
     this.pageUrl = document.getElementById('page-url');
     this.riskBadge = document.getElementById('risk-badge');
     this.riskScoreEl = document.getElementById('risk-score');
+    this.engineBadge = document.getElementById('engine-badge');
+    this.engineNameEl = document.getElementById('engine-name');
   }
 
   /** Form submit, tool buttons, stop, proxy toggle, tab clicks, search inputs, viewport click/scroll/mousemove, keyboard, resizer. */
@@ -411,7 +413,9 @@ class App {
     this.renderScreenshotsPanel();
     this.renderSecurityPanel();
     this.renderDetectionPanel();
+    this.engine = null;
     this.riskBadge.style.display = 'none';
+    this.engineBadge.style.display = 'none';
     this.stopBtn.style.display = 'none';
     this.pageUrl.textContent = '';
     this.inspectHighlight.style.display = 'none';
@@ -461,6 +465,7 @@ class App {
         this.securityHeaders = r.security_headers || [];
         this.redirectChain = r.redirect_chain || [];
         this.finalUrl = r.final_url || null;
+        this.engine = r.engine || null;
 
         const allTimestamps = [
           ...this.networkRequests.map(r => r.timestamp),
@@ -477,6 +482,7 @@ class App {
         this.renderRawPanel();
         this.renderSecurityPanel();
         this.renderDetectionPanel();
+        this.updateEngineBadge();
         this.updateRiskBadge();
       }
 
@@ -623,6 +629,7 @@ class App {
           if (r.security_headers?.length) this.securityHeaders = r.security_headers;
           if (r.redirect_chain?.length) this.redirectChain = r.redirect_chain;
           if (r.final_url) this.finalUrl = r.final_url;
+          if (r.engine) this.engine = r.engine;
 
           const allTimestamps = [
             ...this.networkRequests.map(x => x.timestamp),
@@ -638,6 +645,7 @@ class App {
           this.renderSecurityPanel();
           this.renderDetectionPanel();
           this.updateRiskBadge();
+          this.updateEngineBadge();
         }
         if (event.status === 'pending' || event.status === 'running') {
           this.updateStopButton(event.status);
@@ -651,11 +659,15 @@ class App {
         break;
 
       case 'navigation_complete':
-        console.log(`[ui] Navigation complete: ${event.url} "${event.title}"`);
+        console.log(`[ui] Navigation complete: ${event.url} "${event.title}" engine=${event.engine}`);
         this.pageUrl.textContent = event.url;
         this.finalUrl = event.url;
         if (event.title) {
           document.title = `${event.title} — Carabistouille`;
+        }
+        if (event.engine) {
+          this.engine = event.engine;
+          this.updateEngineBadge();
         }
         this.updateStopButton('running');
         this.loadAnalyses();
@@ -677,6 +689,7 @@ class App {
           if (event.report.security_headers?.length) this.securityHeaders = event.report.security_headers;
           if (event.report.redirect_chain?.length) this.redirectChain = event.report.redirect_chain;
           if (event.report.final_url) this.finalUrl = event.report.final_url;
+          if (event.report.engine) this.engine = event.report.engine;
           this.security = event.report.security || null;
           this.riskScore = event.report.risk_score;
           this.riskFactors = event.report.risk_factors || [];
@@ -687,6 +700,7 @@ class App {
           this.renderSecurityPanel();
           this.renderDetectionPanel();
           this.updateRiskBadge();
+          this.updateEngineBadge();
         }
         this.loadScreenshotTimeline();
         this.loadAnalyses();
@@ -749,6 +763,19 @@ class App {
     else this.riskBadge.classList.add('high');
   }
 
+  updateEngineBadge() {
+    if (!this.engine) {
+      this.engineBadge.style.display = 'none';
+      return;
+    }
+    const labels = {
+      'puppeteer': 'Puppeteer',
+      'puppeteer-extra': 'Puppeteer Extra + Stealth',
+    };
+    this.engineBadge.style.display = 'inline-flex';
+    this.engineNameEl.textContent = labels[this.engine] || this.engine;
+  }
+
   /** Render Network tab with type filters, resource type badges, and expandable request details. */
   renderNetworkPanel() {
     const list = document.getElementById('panel-network-list');
@@ -781,6 +808,9 @@ class App {
         (r.resource_type || '').toLowerCase().includes(query)
       );
     }
+
+    // Newest first (reverse chronological order)
+    filtered = [...filtered].reverse();
 
     const TYPE_COLORS = {
       document: '#3b82f6', script: '#f59e0b', stylesheet: '#8b5cf6', xhr: '#10b981',

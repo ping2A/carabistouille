@@ -60,6 +60,8 @@ pub enum AgentEvent {
         analysis_id: String,
         url: String,
         title: Option<String>,
+        #[serde(default)]
+        engine: Option<String>,
     },
     AnalysisComplete {
         analysis_id: String,
