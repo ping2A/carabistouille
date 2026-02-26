@@ -41,9 +41,9 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
 |  |       :id/stop   |  |  between viewer  |  |  (agent cmds,   | |
 |  |  GET  /analyses/ |  |  and agent       |  |   viewer evts)  | |
 |  |    :id/screenshots|  |                  |  |                 | |
-|  |  DELETE /analyses |  |  Report snapshot |  |  Raw file store | |
-|  |       /:id       |  |  on connect      |  |  Screenshot     | |
-|  |  GET  /status    |  |                  |  |  timeline       | |
+|  |  DELETE /analyses |  |  Report snapshot |  |  SQLite persist | |
+|  |       /:id       |  |  on connect      |  |  Analysis 5m   | |
+|  |  GET  /status    |  |                  |  |  timeout       | |
 |  +------------------+  +------------------+  +-----------------+ |
 +------------------------------------------------------------------+
 
@@ -57,7 +57,7 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
 |  |  Sends events    |  |  analysis flow   |  |  per analysis   | |
 |  |  Auto-reconnect  |  |  Captures data   |  |  createSession  | |
 |  |                  |  |  Computes risk   |  |  closeSession   | |
-|  |                  |  |  Security scan   |  |  Proxy per run  | |
+|  |                  |  |  Security scan   |  |  Proxy, UA      | |
 |  |                  |  |  Stop/abort      |  |  Screenshots    | |
 |  |                  |  |  Raw file capture|  |  Clipboard hooks| |
 |  |                  |  |  Page source     |  |                 | |
@@ -233,9 +233,10 @@ Benefits:
 - **Isolation** — No shared cookies, cache, localStorage, or process state between analyses.
 - **Safety** — A malicious page cannot affect other analyses or the agent process.
 - **Proxy per run** — Each analysis can use a different proxy (or none); the agent spawns Chromium with the right `--proxy-server` for that run.
+- **User-Agent per run** — Each analysis can use a custom User-Agent (preset or custom string); the agent calls `page.setUserAgent()` before navigation to simulate other devices or browsers.
 - **Clean teardown** — When an analysis ends, its browser can be closed; other analyses keep running in their own Chromium.
 
-The agent keeps a session map (`analysis_id` → `{ browser, page }`). On `navigate`, it calls `createSession(analysisId, proxy)` to launch a new Chromium; interaction commands (click, scroll, etc.) are routed to that session by `analysis_id`.
+The agent keeps a session map (`analysis_id` → `{ browser, page }`). On `navigate`, it calls `createSession(analysisId, proxy, userAgent)` to launch a new Chromium (with optional proxy and User-Agent); interaction commands (click, scroll, etc.) are routed to that session by `analysis_id`.
 
 ## Proxy Support
 
@@ -260,15 +261,33 @@ Supported formats: `http://host:port`, `socks5://host:port`, `socks4://host:port
 
 Each analysis gets a **new** Chromium instance; if you pass a proxy, that instance is launched with `--proxy-server=<proxy>`.
 
+## User-Agent Simulation
+
+Simulate different devices or browsers by setting a custom User-Agent before analyzing.
+
+In the UI, use the **User agent** dropdown in the sidebar: choose **Default** (Puppeteer default), a preset (**Chrome (Desktop)**, **Safari (iPhone)**, **Chrome (Android)**, **Firefox (Desktop)**), or **Custom…** and paste any User-Agent string.
+
+Via API:
+
+```bash
+curl -X POST http://localhost:3000/api/analyses \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com", "user_agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"}'
+```
+
+The agent applies the User-Agent with `page.setUserAgent()` before navigating to the URL.
+
 ## Features
 
 ### Core Analysis
 
 - **One headless Chromium per analysis** — Full isolation; no shared browser state.
 - Submit URLs and watch the browser navigate in real time.
+- **User-Agent simulation** — Choose a preset (Chrome Desktop, Safari iPhone, Chrome Android, Firefox Desktop) or paste a custom User-Agent string before analyzing, to simulate different devices or browsers.
 - Click, scroll, and type in the remote browser (and keep interacting after the report).
 - Inspect DOM elements with a point-and-click inspector.
 - **Finish** button to stop a running analysis and get a partial report.
+- **Analysis timeout** — Analyses are force-stopped after 5 minutes if still running.
 - Proxy support (HTTP, SOCKS4, SOCKS5) per analysis to hide your IP.
 - Resilient navigation with multiple `waitUntil` strategies and CDP fallback.
 
@@ -294,6 +313,8 @@ Each analysis gets a **new** Chromium instance; if you pass a proxy, that instan
 
 ### UI Features
 
+- **Theme** — Toggle between dark and light theme; choice persisted in the browser.
+- **Multi-language** — English, French, and Chinese; language persisted in the browser.
 - **Resizable report panel** — Drag the divider to adjust panel width (default 560px, up to 65vw).
 - **Search/filter** in Network, Scripts, Console, and Raw tabs.
 - **Full source viewer** — Modal with syntax highlighting (highlight.js), copy and download buttons.
@@ -301,10 +322,11 @@ Each analysis gets a **new** Chromium instance; if you pass a proxy, that instan
 - **Download buttons** — Download any raw file, script source, page source, or screenshot.
 - **Absolute + relative timestamps** — Shown on all network requests, scripts, console logs, and raw files.
 - **Report tabs** — Network, Scripts, Console, Raw, Screenshots, Security.
-- Admin dashboard with overview of all analyses, stats, and detail view.
+- Admin dashboard with overview of all analyses, stats, detail view, and delete (removes from server and database).
 
 ### Infrastructure
 
+- **SQLite persistence** — Analyses are saved to a local SQLite database and loaded on server restart. Database path is configurable via `DATABASE_PATH`.
 - **TLS / HTTPS** — Native rustls support with self-signed certs for dev or custom certs for production.
 - **Report snapshots** — Viewer WebSocket connections receive all accumulated data on connect, preventing missed events.
 - **Configurable agent** — Centralized `config.js` for headless mode, viewport, Chromium flags, navigation strategies, and screenshot settings.
@@ -393,6 +415,7 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 |----------|---------|-------------|
 | `PORT` | `3000` | Server listen port |
 | `RUST_LOG` | `carabistouille=debug` | Server log level |
+| `DATABASE_PATH` | `carabistouille.db` | Path to SQLite database file (analyses persistence) |
 | `TLS_CERT` | — | Path to PEM certificate file (enables TLS) |
 | `TLS_KEY` | — | Path to PEM private key file (requires `TLS_CERT`) |
 | `TLS_SELF_SIGNED` | `false` | Set to `true` to auto-generate a self-signed cert |
@@ -404,18 +427,18 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/status` | Agent connection status + analysis count |
-| `POST` | `/api/analyses` | Submit URL for analysis (accepts `url`, optional `proxy`) |
+| `POST` | `/api/analyses` | Submit URL for analysis (accepts `url`, optional `proxy`, optional `user_agent`) |
 | `GET` | `/api/analyses` | List all analyses (sorted newest first) |
 | `GET` | `/api/analyses/:id` | Get analysis details + report (includes last screenshot for completed) |
 | `GET` | `/api/analyses/:id/screenshots` | Get screenshot timeline for an analysis |
 | `POST` | `/api/analyses/:id/stop` | Stop a running analysis (returns partial report) |
-| `DELETE` | `/api/analyses/:id` | Delete an analysis |
+| `DELETE` | `/api/analyses/:id` | Delete an analysis (removes from in-memory state and SQLite database) |
 
 ## WebSocket Protocol
 
 | Endpoint | Direction | Description |
 |----------|-----------|-------------|
-| `/ws/agent` | Server -> Agent | Commands: navigate, click, scroll, move_mouse, type_text, key_press, inspect_element, stop_analysis |
+| `/ws/agent` | Server -> Agent | Commands: navigate (url, proxy, user_agent), click, scroll, move_mouse, type_text, key_press, inspect_element, stop_analysis |
 | `/ws/agent` | Agent -> Server | Events: screenshot, network_request_captured, console_log_captured, redirect_detected, script_loaded, navigation_complete, raw_file_captured, page_source_captured, clipboard_captured, analysis_complete, element_info, error, agent_ready |
 | `/ws/viewer/:id` | Viewer -> Server | Commands: click, scroll, mousemove, type_text, keypress, inspect, stop_analysis |
 | `/ws/viewer/:id` | Server -> Viewer | All agent events forwarded + report_snapshot on connect + screenshot_timeline_available notification |
@@ -439,4 +462,4 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | Agent | Node.js, Puppeteer (v24+), ws |
 | Frontend | Vanilla JS, WebSocket API, Fetch API, highlight.js (syntax highlighting) |
 | Browser | One headless Chromium per analysis (Puppeteer, `headless: 'shell'` mode) |
-| State | In-memory (DashMap + broadcast channels) |
+| State | In-memory (DashMap + broadcast channels) + SQLite persistence (analyses) |
