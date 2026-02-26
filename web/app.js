@@ -26,6 +26,7 @@ class App {
     this.riskFactors = [];
     this.rawFiles = [];
     this.clipboardReads = [];
+    this.detectionAttempts = [];
     this.pageSource = null;
     this.domSnapshot = null;
     this.storageCapture = null;
@@ -64,6 +65,7 @@ class App {
     this.renderRawPanel();
     this.renderScreenshotsPanel();
     this.renderSecurityPanel();
+    this.renderDetectionPanel();
   }
 
   updateAgentStatusText() {
@@ -389,6 +391,7 @@ class App {
     this.analysisStartTime = null;
     this.rawFiles = [];
     this.clipboardReads = [];
+    this.detectionAttempts = [];
     this.pageSource = null;
     this.domSnapshot = null;
     this.storageCapture = null;
@@ -407,6 +410,7 @@ class App {
     this.renderRawPanel();
     this.renderScreenshotsPanel();
     this.renderSecurityPanel();
+    this.renderDetectionPanel();
     this.riskBadge.style.display = 'none';
     this.stopBtn.style.display = 'none';
     this.pageUrl.textContent = '';
@@ -449,6 +453,7 @@ class App {
         this.riskScore = r.risk_score;
         this.riskFactors = r.risk_factors || [];
         this.clipboardReads = r.clipboard_reads || [];
+        this.detectionAttempts = r.detection_attempts || [];
         this.rawFiles = r.raw_files || [];
         this.pageSource = r.page_source || null;
         this.domSnapshot = r.dom_snapshot || null;
@@ -471,6 +476,7 @@ class App {
         this.renderConsolePanel();
         this.renderRawPanel();
         this.renderSecurityPanel();
+        this.renderDetectionPanel();
         this.updateRiskBadge();
       }
 
@@ -587,6 +593,11 @@ class App {
         this.renderSecurityPanel();
         break;
 
+      case 'detection_event':
+        this.detectionAttempts.push(event.attempt);
+        this.renderDetectionPanel();
+        break;
+
       case 'screenshot_timeline_available':
         console.log(`[ui] Screenshot timeline available: ${event.count} entries`);
         this.screenshotTimelineCount = event.count;
@@ -604,6 +615,7 @@ class App {
           if (r.risk_score !== undefined) this.riskScore = r.risk_score;
           if (r.risk_factors?.length) this.riskFactors = r.risk_factors;
           if (r.clipboard_reads?.length) this.clipboardReads = r.clipboard_reads;
+          if (r.detection_attempts?.length > this.detectionAttempts.length) this.detectionAttempts = r.detection_attempts;
           if (r.raw_files?.length > this.rawFiles.length) this.rawFiles = r.raw_files;
           if (r.page_source) this.pageSource = r.page_source;
           if (r.dom_snapshot) this.domSnapshot = r.dom_snapshot;
@@ -624,6 +636,7 @@ class App {
           this.renderConsolePanel();
           this.renderRawPanel();
           this.renderSecurityPanel();
+          this.renderDetectionPanel();
           this.updateRiskBadge();
         }
         if (event.status === 'pending' || event.status === 'running') {
@@ -656,6 +669,7 @@ class App {
           this.scripts = event.report.scripts || this.scripts;
           this.consoleLogs = event.report.console_logs || this.consoleLogs;
           this.clipboardReads = event.report.clipboard_reads || this.clipboardReads;
+          if (event.report.detection_attempts?.length) this.detectionAttempts = event.report.detection_attempts;
           if (event.report.raw_files?.length) this.rawFiles = event.report.raw_files;
           if (event.report.page_source) this.pageSource = event.report.page_source;
           if (event.report.dom_snapshot) this.domSnapshot = event.report.dom_snapshot;
@@ -671,6 +685,7 @@ class App {
           this.renderConsolePanel();
           this.renderRawPanel();
           this.renderSecurityPanel();
+          this.renderDetectionPanel();
           this.updateRiskBadge();
         }
         this.loadScreenshotTimeline();
@@ -1744,6 +1759,79 @@ class App {
         this._downloadFile('redirect-chain.json', JSON.stringify(payload, null, 2), 'application/json');
       });
     });
+  }
+
+  renderDetectionPanel() {
+    const list = document.getElementById('panel-detection-list');
+    const countEl = document.getElementById('count-detection');
+    if (countEl) countEl.textContent = this.detectionAttempts.length;
+
+    if (this.detectionAttempts.length === 0) {
+      list.innerHTML = '<div class="panel-empty">' + this.t('app.noDetection') + '</div>';
+      return;
+    }
+
+    const grouped = {};
+    for (const a of this.detectionAttempts) {
+      const cat = a.category || 'other';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(a);
+    }
+
+    const catOrder = ['bot-detection', 'fingerprint', 'other'];
+    const catLabels = {
+      'bot-detection': this.t('app.detCatBot'),
+      'fingerprint': this.t('app.detCatFingerprint'),
+      'other': this.t('app.detCatOther'),
+    };
+    const sevColors = { high: 'var(--danger)', medium: 'var(--warning)', low: 'var(--text-tertiary)' };
+    const sevLabels = { high: this.t('app.detSevHigh'), medium: this.t('app.detSevMedium'), low: this.t('app.detSevLow') };
+
+    const highCount = this.detectionAttempts.filter(a => a.severity === 'high').length;
+    const medCount = this.detectionAttempts.filter(a => a.severity === 'medium').length;
+    const lowCount = this.detectionAttempts.filter(a => a.severity === 'low').length;
+
+    let html = '<div class="det-summary">';
+    html += `<div class="det-summary-title">${this.t('app.detSummary')}</div>`;
+    html += '<div class="det-summary-badges">';
+    if (highCount > 0) html += `<span class="det-badge det-badge-high">${highCount} ${sevLabels.high}</span>`;
+    if (medCount > 0) html += `<span class="det-badge det-badge-medium">${medCount} ${sevLabels.medium}</span>`;
+    if (lowCount > 0) html += `<span class="det-badge det-badge-low">${lowCount} ${sevLabels.low}</span>`;
+    html += `<span class="det-badge det-badge-total">${this.detectionAttempts.length} total</span>`;
+    html += '</div>';
+    if (highCount > 0) {
+      html += `<div class="det-verdict det-verdict-detected">${this.t('app.detVerdictDetected')}</div>`;
+    } else if (medCount > 0) {
+      html += `<div class="det-verdict det-verdict-possible">${this.t('app.detVerdictPossible')}</div>`;
+    } else {
+      html += `<div class="det-verdict det-verdict-low">${this.t('app.detVerdictLow')}</div>`;
+    }
+    html += '</div>';
+
+    for (const cat of catOrder) {
+      const items = grouped[cat];
+      if (!items || items.length === 0) continue;
+      html += `<div class="det-category">`;
+      html += `<div class="det-category-header">${catLabels[cat] || cat} <span class="det-category-count">(${items.length})</span></div>`;
+      for (const a of items) {
+        const sevColor = sevColors[a.severity] || sevColors.low;
+        const timeLabel = this._timeLabel(a.timestamp);
+        const absTime = this._absTime(a.timestamp);
+        const callerShort = a.caller ? a.caller.replace(/^\s*at\s+/, '').substring(0, 100) : '';
+        html += `<div class="det-item">`;
+        html += `<div class="det-item-header">`;
+        html += `<span class="det-severity" style="color:${sevColor}">${sevLabels[a.severity] || a.severity}</span>`;
+        html += `<code class="det-property">${this.esc(a.property)}</code>`;
+        if (absTime) html += `<span class="det-time" title="${timeLabel}">${absTime}</span>`;
+        html += `</div>`;
+        if (a.description) html += `<div class="det-description">${this.esc(a.description)}</div>`;
+        if (callerShort) html += `<div class="det-caller" title="${this.esc(a.caller || '')}"><span class="det-caller-label">Caller:</span> ${this.esc(callerShort)}</div>`;
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+
+    list.innerHTML = html;
   }
 
   /** Run highlight.js on code blocks in the container. */

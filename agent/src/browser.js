@@ -52,6 +52,7 @@ export class BrowserManager {
     }
 
     await this.installStealthPatches(page);
+    await this.installDetectionMonitors(page);
 
     this.sessions.set(analysisId, { browser, page, proxy });
     console.log(`[browser] Session created for ${analysisId} (proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
@@ -137,10 +138,11 @@ export class BrowserManager {
     const viewportHeight = this.viewportHeight;
     await page.evaluateOnNewDocument((vw, vh) => {
       // 1. Remove navigator.webdriver flag (most common detection)
-      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
 
       // 2. Fake navigator.plugins (headless has 0 plugins)
       Object.defineProperty(navigator, 'plugins', {
+        configurable: true,
         get: () => {
           const plugins = [
             { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
@@ -153,16 +155,16 @@ export class BrowserManager {
       });
 
       // 3. Fake navigator.languages (headless may have empty array)
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      Object.defineProperty(navigator, 'language', { get: () => 'en-US' });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+      Object.defineProperty(navigator, 'language', { get: () => 'en-US', configurable: true });
 
       // 4. navigator.vendor / pdfViewerEnabled / maxTouchPoints (Chrome desktop)
-      Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.' });
-      Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true });
-      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 });
+      Object.defineProperty(navigator, 'vendor', { get: () => 'Google Inc.', configurable: true });
+      Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true, configurable: true });
+      Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0, configurable: true });
 
       // 5. navigator.platform (match common Chrome desktop; headless often reports "Linux")
-      Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+      Object.defineProperty(navigator, 'platform', { get: () => 'Win32', configurable: true });
 
       // 6. Realistic screen dimensions (headless can report 0 or odd values)
       const screenOverrides = {
@@ -238,6 +240,7 @@ export class BrowserManager {
       // 11. Fix missing connection property (headless may have undefined)
       if (navigator.connection === undefined) {
         Object.defineProperty(navigator, 'connection', {
+          configurable: true,
           get: () => ({
             effectiveType: '4g',
             rtt: 50,
@@ -248,10 +251,10 @@ export class BrowserManager {
       }
 
       // 12. Ensure navigator.hardwareConcurrency reports a realistic value
-      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+      Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
 
       // 13. Ensure navigator.deviceMemory reports a realistic value
-      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+      Object.defineProperty(navigator, 'deviceMemory', { get: () => 8, configurable: true });
 
       // 14. Notification.permission (some scripts expect "default" or "denied", not undefined)
       if (typeof Notification !== 'undefined' && (Notification.permission === undefined || Notification.permission === null)) {
@@ -275,6 +278,348 @@ export class BrowserManager {
         return el;
       };
     }, viewportWidth, viewportHeight);
+  }
+
+  /**
+   * Install monitors that record when page scripts probe properties commonly used for headless detection.
+   * The monitors wrap the already-patched stealth values, so they return the spoofed value while
+   * logging the access (property, category, stack trace) to window.__detectionAttempts.
+   */
+  async installDetectionMonitors(page) {
+    await page.evaluateOnNewDocument(() => {
+      window.__detectionAttempts = [];
+      const seen = new Set();
+
+      function record(property, category, severity, description) {
+        const stack = new Error().stack || '';
+        const frames = stack.split('\n').slice(2).filter(f => !f.includes('evaluateOnNewDocument') && !f.includes('__puppeteer'));
+        const caller = frames[0]?.trim() || '';
+        const key = `${property}|${caller}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        window.__detectionAttempts.push({
+          property,
+          category,
+          severity,
+          description,
+          caller,
+          timestamp: Date.now(),
+        });
+      }
+
+      function wrapGetter(obj, prop, meta) {
+        let desc = Object.getOwnPropertyDescriptor(obj, prop);
+        if (!desc) {
+          // Property may live on the prototype chain (e.g. Navigator.prototype)
+          let proto = Object.getPrototypeOf(obj);
+          while (proto && !desc) {
+            desc = Object.getOwnPropertyDescriptor(proto, prop);
+            proto = Object.getPrototypeOf(proto);
+          }
+        }
+        if (!desc) return;
+        const origGet = desc.get || (() => desc.value);
+        try {
+          Object.defineProperty(obj, prop, {
+            get: function () {
+              record(meta.property, meta.category, meta.severity, meta.description);
+              return origGet.call(this);
+            },
+            configurable: true,
+            enumerable: desc.enumerable !== false,
+          });
+        } catch (_) {}
+      }
+
+      // navigator probes
+      const navProbes = [
+        ['webdriver', 'bot-detection', 'high', 'Checks navigator.webdriver automation flag'],
+        ['plugins', 'fingerprint', 'high', 'Enumerates browser plugins (empty in headless)'],
+        ['languages', 'fingerprint', 'medium', 'Reads navigator.languages array'],
+        ['platform', 'fingerprint', 'medium', 'Reads navigator.platform string'],
+        ['vendor', 'fingerprint', 'low', 'Reads navigator.vendor string'],
+        ['hardwareConcurrency', 'fingerprint', 'medium', 'Reads CPU core count'],
+        ['deviceMemory', 'fingerprint', 'medium', 'Reads device memory (GB)'],
+        ['connection', 'fingerprint', 'medium', 'Reads Network Information API'],
+        ['maxTouchPoints', 'fingerprint', 'low', 'Reads touch capability'],
+        ['pdfViewerEnabled', 'fingerprint', 'low', 'Checks PDF viewer support'],
+      ];
+      for (const [prop, cat, sev, desc] of navProbes) {
+        wrapGetter(navigator, prop, {
+          property: `navigator.${prop}`, category: cat, severity: sev, description: desc,
+        });
+      }
+
+      // screen probes
+      const screenProbes = ['width', 'height', 'availWidth', 'availHeight', 'colorDepth', 'pixelDepth'];
+      for (const prop of screenProbes) {
+        wrapGetter(screen, prop, {
+          property: `screen.${prop}`, category: 'fingerprint', severity: 'low',
+          description: `Reads screen.${prop}`,
+        });
+      }
+
+      // window.chrome probe
+      try {
+        const chromeVal = window.chrome;
+        Object.defineProperty(window, 'chrome', {
+          get: function () {
+            record('window.chrome', 'bot-detection', 'high', 'Checks if window.chrome object exists');
+            return chromeVal;
+          },
+          set: function (v) {},
+          configurable: true,
+        });
+      } catch (_) {}
+
+      // Notification.permission
+      if (typeof Notification !== 'undefined') {
+        wrapGetter(Notification, 'permission', {
+          property: 'Notification.permission', category: 'fingerprint', severity: 'medium',
+          description: 'Reads notification permission state',
+        });
+      }
+
+      // Permissions.query for notifications
+      if (window.Permissions?.prototype?.query) {
+        const origPQ = window.Permissions.prototype.query;
+        window.Permissions.prototype.query = function (params) {
+          if (params?.name === 'notifications') {
+            record('Permissions.query(notifications)', 'bot-detection', 'high',
+              'Probes notification permission via Permissions API');
+          }
+          return origPQ.call(this, params);
+        };
+      }
+
+      // WebGL getParameter (vendor/renderer fingerprint)
+      for (const Ctx of [WebGLRenderingContext, WebGL2RenderingContext]) {
+        if (!Ctx?.prototype?.getParameter) continue;
+        const origGP = Ctx.prototype.getParameter;
+        Ctx.prototype.getParameter = function (param) {
+          if (param === 37445 || param === 37446) {
+            record(`WebGL.getParameter(${param === 37445 ? 'VENDOR' : 'RENDERER'})`,
+              'fingerprint', 'high', 'Reads WebGL vendor/renderer for GPU fingerprinting');
+          }
+          return origGP.call(this, param);
+        };
+      }
+
+      // Canvas fingerprinting
+      const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+      HTMLCanvasElement.prototype.toDataURL = function (...args) {
+        record('canvas.toDataURL', 'fingerprint', 'high', 'Canvas fingerprinting via toDataURL');
+        return origToDataURL.apply(this, args);
+      };
+      const origToBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function (...args) {
+        record('canvas.toBlob', 'fingerprint', 'high', 'Canvas fingerprinting via toBlob');
+        return origToBlob.apply(this, args);
+      };
+      const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+      CanvasRenderingContext2D.prototype.getImageData = function (...args) {
+        record('canvas.getImageData', 'fingerprint', 'high', 'Canvas fingerprinting via getImageData');
+        return origGetImageData.apply(this, args);
+      };
+
+      // AudioContext fingerprinting
+      if (typeof AudioContext !== 'undefined') {
+        const origCreateOsc = AudioContext.prototype.createOscillator;
+        AudioContext.prototype.createOscillator = function () {
+          record('AudioContext.createOscillator', 'fingerprint', 'high',
+            'Audio fingerprinting via OscillatorNode');
+          return origCreateOsc.call(this);
+        };
+      }
+
+      // matchMedia probes (prefers-color-scheme, prefers-reduced-motion)
+      // Returns a wrapped MediaQueryList that also monitors .matches and .addEventListener('change')
+      const origMatchMedia = window.matchMedia;
+      if (origMatchMedia) {
+        window.matchMedia = function (query) {
+          const mql = origMatchMedia.call(this, query);
+          const isDetectionQuery = typeof query === 'string' &&
+            (query.includes('prefers-color-scheme') || query.includes('prefers-reduced-motion'));
+          if (isDetectionQuery) {
+            record(`matchMedia("${query}")`, 'bot-detection', 'medium',
+              'Media query probe often used to detect headless mode');
+
+            // Wrap .matches to detect when the result is read
+            try {
+              const origMatches = Object.getOwnPropertyDescriptor(MediaQueryList.prototype, 'matches')?.get;
+              if (origMatches) {
+                Object.defineProperty(mql, 'matches', {
+                  get: function () {
+                    record(`matchMedia("${query}").matches`, 'bot-detection', 'high',
+                      'Reads media query result — headless browsers may return unexpected values');
+                    return origMatches.call(this);
+                  },
+                  configurable: true,
+                });
+              }
+            } catch (_) {}
+
+            // Wrap addEventListener to detect change listeners (cookie persistence / reload detection pattern)
+            const origAddEL = mql.addEventListener?.bind(mql);
+            if (origAddEL) {
+              mql.addEventListener = function (type, ...rest) {
+                if (type === 'change') {
+                  record(`matchMedia("${query}").addEventListener("change")`, 'bot-detection', 'high',
+                    'Listens for media query changes — classic headless detection: mismatched events trigger redirect');
+                }
+                return origAddEL(type, ...rest);
+              };
+            }
+            // Legacy .addListener (deprecated but still used by detection scripts)
+            const origAddL = mql.addListener?.bind(mql);
+            if (origAddL) {
+              mql.addListener = function (cb) {
+                record(`matchMedia("${query}").addListener`, 'bot-detection', 'high',
+                  'Legacy media query change listener — headless detection pattern');
+                return origAddL(cb);
+              };
+            }
+          }
+          return mql;
+        };
+      }
+
+      // document.cookie reads (cookie persistence verification)
+      try {
+        const cookieDesc = Object.getOwnPropertyDescriptor(Document.prototype, 'cookie') ||
+                           Object.getOwnPropertyDescriptor(HTMLDocument.prototype, 'cookie');
+        if (cookieDesc) {
+          const origCookieGet = cookieDesc.get;
+          const origCookieSet = cookieDesc.set;
+          Object.defineProperty(document, 'cookie', {
+            get: function () {
+              record('document.cookie (read)', 'bot-detection', 'medium',
+                'Reads cookies — may verify cookie persistence across reloads (headless detection)');
+              return origCookieGet.call(this);
+            },
+            set: function (val) {
+              // Only flag suspicious theme/detection cookies, not all cookie writes
+              const lv = (typeof val === 'string' ? val : '').toLowerCase();
+              if (lv.includes('theme') || lv.includes('bot') || lv.includes('detect') ||
+                  lv.includes('captcha') || lv.includes('challenge') || lv.includes('fingerprint')) {
+                record(`document.cookie (set: ${val.split('=')[0]})`, 'bot-detection', 'high',
+                  'Sets a detection/theme cookie — part of cookie persistence verification pattern');
+              }
+              return origCookieSet.call(this, val);
+            },
+            configurable: true,
+          });
+        }
+      } catch (_) {}
+
+      // window.location assignments (redirect after detection)
+      try {
+        const locDesc = Object.getOwnPropertyDescriptor(window, 'location');
+        if (locDesc?.set) {
+          const origLocSet = locDesc.set;
+          Object.defineProperty(window, 'location', {
+            get: locDesc.get,
+            set: function (val) {
+              record('window.location (redirect)', 'bot-detection', 'high',
+                'Redirecting via location assignment — may be a detection-triggered redirect');
+              return origLocSet.call(this, val);
+            },
+            configurable: true,
+          });
+        }
+      } catch (_) {}
+
+      // location.href setter (most common redirect pattern)
+      try {
+        const hrefDesc = Object.getOwnPropertyDescriptor(window.location.__proto__, 'href') ||
+                         Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+        if (hrefDesc?.set) {
+          const origHrefGet = hrefDesc.get;
+          const origHrefSet = hrefDesc.set;
+          Object.defineProperty(window.location, 'href', {
+            get: function () { return origHrefGet.call(this); },
+            set: function (val) {
+              record(`location.href = "${(val || '').substring(0, 80)}"`, 'bot-detection', 'high',
+                'Redirect via location.href — often used after bot/headless detection fails');
+              return origHrefSet.call(this, val);
+            },
+            configurable: true,
+          });
+        }
+      } catch (_) {}
+
+      // location.replace (another common redirect method)
+      try {
+        const origReplace = Location.prototype.replace;
+        Location.prototype.replace = function (url) {
+          record(`location.replace("${(url || '').substring(0, 80)}")`, 'bot-detection', 'high',
+            'Redirect via location.replace — often used after bot/headless detection');
+          return origReplace.call(this, url);
+        };
+      } catch (_) {}
+
+      // Error.stack analysis (some detectors look for "puppeteer" in the stack)
+      const origPrepare = Error.prepareStackTrace;
+      if (typeof Error.prepareStackTrace === 'function' || Error.prepareStackTrace === undefined) {
+        Error.prepareStackTrace = function (err, structuredStack) {
+          record('Error.prepareStackTrace', 'bot-detection', 'medium',
+            'Overrides Error.prepareStackTrace (stack trace analysis)');
+          if (origPrepare) return origPrepare(err, structuredStack);
+          return structuredStack.map(s => `    at ${s}`).join('\n');
+        };
+      }
+
+      // Object.keys(document) scanning for automation artifacts
+      const origObjKeys = Object.keys;
+      Object.keys = function (obj) {
+        const result = origObjKeys.call(this, obj);
+        if (obj === document) {
+          record('Object.keys(document)', 'bot-detection', 'high',
+            'Scanning document properties for automation artifacts ($cdc_, __webdriver_, etc.)');
+        }
+        return result;
+      };
+
+      // Object.getOwnPropertyNames(document/navigator) — deeper artifact scan
+      const origGetOwnPropNames = Object.getOwnPropertyNames;
+      Object.getOwnPropertyNames = function (obj) {
+        const result = origGetOwnPropNames.call(this, obj);
+        if (obj === document || obj === navigator) {
+          record(`Object.getOwnPropertyNames(${obj === document ? 'document' : 'navigator'})`,
+            'bot-detection', 'high',
+            'Deep property scan for automation artifacts');
+        }
+        return result;
+      };
+
+      // navigator.sendBeacon — sometimes used to phone home detection results
+      if (navigator.sendBeacon) {
+        const origBeacon = navigator.sendBeacon.bind(navigator);
+        navigator.sendBeacon = function (url, data) {
+          const bodyStr = typeof data === 'string' ? data : '';
+          const lv = (url + ' ' + bodyStr).toLowerCase();
+          if (lv.includes('bot') || lv.includes('detect') || lv.includes('fingerprint') ||
+              lv.includes('headless') || lv.includes('automation') || lv.includes('webdriver')) {
+            record(`navigator.sendBeacon("${(url || '').substring(0, 80)}")`, 'bot-detection', 'high',
+              'Beacon with detection-related keywords — may be reporting bot detection result');
+          }
+          return origBeacon(url, data);
+        };
+      }
+
+      // fetch/XHR to detection endpoints
+      const origFetch = window.fetch;
+      window.fetch = function (input, init) {
+        const url = typeof input === 'string' ? input : input?.url || '';
+        const lv = url.toLowerCase();
+        if (lv.includes('bot') || lv.includes('captcha') || lv.includes('challenge') ||
+            lv.includes('fingerprint') || lv.includes('detect') || lv.includes('verify-browser')) {
+          record(`fetch("${url.substring(0, 80)}")`, 'bot-detection', 'high',
+            'Fetch to detection/challenge endpoint — site may be verifying browser legitimacy');
+        }
+        return origFetch.call(this, input, init);
+      };
+    });
   }
 
   /**
@@ -375,6 +720,21 @@ export class BrowserManager {
       return captures;
     } catch (err) {
       console.warn(`[browser] Clipboard drain error for ${analysisId}: ${err.message}`);
+      return [];
+    }
+  }
+
+  async drainDetectionAttempts(analysisId) {
+    try {
+      const page = await this.getPage(analysisId);
+      const attempts = await page.evaluate(() => {
+        const list = window.__detectionAttempts || [];
+        window.__detectionAttempts = [];
+        return list;
+      });
+      return attempts;
+    } catch (err) {
+      console.warn(`[browser] Detection drain error for ${analysisId}: ${err.message}`);
       return [];
     }
   }

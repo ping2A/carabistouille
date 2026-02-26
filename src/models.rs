@@ -44,6 +44,20 @@ pub struct ClipboardRead {
     pub trigger: String,
 }
 
+/// A single detection probe observed: a page script accessed a property commonly used to
+/// fingerprint or detect headless/automated browsers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectionAttempt {
+    pub property: String,
+    pub category: String,
+    pub severity: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub caller: Option<String>,
+    pub timestamp: f64,
+}
+
 /// Captured response body for a text-based resource (URL, content type, size, full content).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawFile {
@@ -78,6 +92,8 @@ pub struct AnalysisReport {
     pub security: SecurityInfo,
     pub risk_score: u32,
     pub risk_factors: Vec<String>,
+    #[serde(default)]
+    pub detection_attempts: Vec<DetectionAttempt>,
 }
 
 /// One redirect step (from URL → to URL, HTTP status).

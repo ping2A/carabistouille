@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::models::{
-    AnalysisReport, ClipboardRead, ConsoleLog, HttpHeader, NetworkRequest, RawFile, ScriptInfo,
-    StorageCapture,
+    AnalysisReport, ClipboardRead, ConsoleLog, DetectionAttempt, HttpHeader, NetworkRequest,
+    RawFile, ScriptInfo, StorageCapture,
 };
 
 /// Commands the server sends to the Puppeteer agent over the agent WebSocket.
@@ -98,6 +98,10 @@ pub enum AgentEvent {
         analysis_id: String,
         html: String,
     },
+    DetectionEvent {
+        analysis_id: String,
+        attempt: DetectionAttempt,
+    },
     Error {
         analysis_id: String,
         message: String,
@@ -139,6 +143,7 @@ impl AgentEvent {
             Self::StorageCaptured { .. } => "storage_captured",
             Self::SecurityHeadersCaptured { .. } => "security_headers_captured",
             Self::DomSnapshotCaptured { .. } => "dom_snapshot_captured",
+            Self::DetectionEvent { .. } => "detection_event",
             Self::Error { .. } => "error",
             Self::AgentReady => "agent_ready",
         }

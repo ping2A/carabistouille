@@ -127,6 +127,7 @@
         <button class="tab" data-tab="raw"><span data-i18n="app.tabRaw">Raw</span> <span id="count-raw" class="tab-count">0</span></button>
         <button class="tab" data-tab="screenshots"><span data-i18n="app.tabScreenshots">Screenshots</span> <span id="count-screenshots" class="tab-count">0</span></button>
         <button class="tab" data-tab="security"><span data-i18n="app.tabSecurity">Security</span> <span id="count-security" class="tab-count">0</span></button>
+        <button class="tab" data-tab="detection"><span data-i18n="app.tabDetection">Detection</span> <span id="count-detection" class="tab-count">0</span></button>
       </div>
       <div class="tab-panels">
         <div class="tab-panel active" id="panel-network">
@@ -173,6 +174,9 @@
         </div>
         <div class="tab-panel" id="panel-security">
           <div class="panel-empty" data-i18n="app.noSecurity">No security analysis yet</div>
+        </div>
+        <div class="tab-panel" id="panel-detection">
+          <div id="panel-detection-list" class="panel-list"><div class="panel-empty" data-i18n="app.noDetection">No detection probes observed yet</div></div>
         </div>
       </div>
     </aside>

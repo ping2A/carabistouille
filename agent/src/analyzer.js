@@ -34,6 +34,7 @@ export class Analyzer {
     const clipboardReads = [];
     /** Last response headers per URL for document responses (used for CSP / security headers at stop). */
     const lastDocumentHeadersByUrl = {};
+    const detectionAttempts = [];
     const state = {
       aborted: false,
       sendEvent,
@@ -44,6 +45,7 @@ export class Analyzer {
       consoleLogs,
       redirectChain,
       clipboardReads,
+      detectionAttempts,
       lastDocumentHeadersByUrl,
     };
 
@@ -264,6 +266,7 @@ export class Analyzer {
       screenshotTick++;
       if (screenshotTick % 4 === 0) {
         this._drainAndReportClipboard(analysisId, 'poll');
+        this._drainAndReportDetection(analysisId);
       }
     }, 500);
     this.screenshotIntervals.set(analysisId, screenshotInterval);
@@ -521,6 +524,17 @@ export class Analyzer {
       console.warn(`[analyzer] Clipboard drain at stop: ${err.message}`);
     }
 
+    // Final drain of detection attempts
+    try {
+      const attempts = await this.browserManager.drainDetectionAttempts(analysisId);
+      for (const attempt of attempts) {
+        state.detectionAttempts.push(attempt);
+        sendEvent({ type: 'detection_event', analysis_id: analysisId, attempt });
+      }
+    } catch (err) {
+      console.warn(`[analyzer] Detection drain at stop: ${err.message}`);
+    }
+
     this.cleanupAnalysis(analysisId);
 
     let finalUrl = null;
@@ -610,7 +624,7 @@ export class Analyzer {
       state.networkRequests, allScripts, state.redirectChain, security, state.clipboardReads
     );
 
-    console.log(`[analyzer] Report for ${analysisId}: risk=${riskScore}/100, ${state.networkRequests.length} requests, ${allScripts.length} scripts`);
+    console.log(`[analyzer] Report for ${analysisId}: risk=${riskScore}/100, ${state.networkRequests.length} requests, ${allScripts.length} scripts, ${state.detectionAttempts.length} detection probes`);
     sendEvent({
       type: 'analysis_complete',
       analysis_id: analysisId,
@@ -622,6 +636,7 @@ export class Analyzer {
         scripts: allScripts,
         console_logs: state.consoleLogs,
         clipboard_reads: state.clipboardReads,
+        detection_attempts: state.detectionAttempts,
         security,
         risk_score: riskScore,
         risk_factors: riskFactors,
@@ -654,5 +669,22 @@ export class Analyzer {
   /** Convenience: drain and report clipboard for a given trigger (e.g. 'click', 'keypress'). */
   async reportClipboard(analysisId, trigger = 'click') {
     await this._drainAndReportClipboard(analysisId, trigger);
+  }
+
+  async _drainAndReportDetection(analysisId) {
+    const state = this.activeAnalyses.get(analysisId);
+    if (!state?.sendEvent) return;
+    try {
+      const attempts = await this.browserManager.drainDetectionAttempts(analysisId);
+      for (const attempt of attempts) {
+        state.detectionAttempts.push(attempt);
+        state.sendEvent({ type: 'detection_event', analysis_id: analysisId, attempt });
+      }
+      if (attempts.length > 0) {
+        console.log(`[analyzer] Detected ${attempts.length} detection probe(s) for ${analysisId}`);
+      }
+    } catch (err) {
+      console.warn(`[analyzer] Detection drain: ${err.message}`);
+    }
   }
 }

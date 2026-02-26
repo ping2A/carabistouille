@@ -243,6 +243,9 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                     merged.dom_snapshot = existing.dom_snapshot.clone();
                     merged.storage_capture = existing.storage_capture.clone();
                     merged.security_headers = existing.security_headers.clone();
+                    if merged.detection_attempts.is_empty() && !existing.detection_attempts.is_empty() {
+                        merged.detection_attempts = existing.detection_attempts.clone();
+                    }
                 }
                 analysis.report = Some(merged);
             }
@@ -333,13 +336,34 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             forward_to_viewer(state, analysis_id, &event);
         }
 
+        AgentEvent::DetectionEvent {
+            analysis_id,
+            attempt,
+        } => {
+            tracing::debug!(
+                "Detection probe for {}: {} ({})",
+                analysis_id,
+                attempt.property,
+                attempt.severity
+            );
+            if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+                let report = analysis.report.get_or_insert_with(Default::default);
+                report.detection_attempts.push(attempt.clone());
+            }
+            forward_to_viewer(state, analysis_id, &event);
+        }
+
         AgentEvent::Error {
             analysis_id,
             message,
         } => {
             tracing::error!("Agent error for {}: {}", analysis_id, message);
             if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
-                analysis.status = AnalysisStatus::Error;
+                // Do not overwrite a successful completion: late errors (e.g. from a viewer
+                // command after the analysis finished) must not flip status to Error.
+                if analysis.status != AnalysisStatus::Complete {
+                    analysis.status = AnalysisStatus::Error;
+                }
             }
             state.cancel_analysis_timeout(analysis_id);
             if let Some(a) = state.analyses.get(analysis_id) {

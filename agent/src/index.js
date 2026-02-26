@@ -79,6 +79,11 @@ class Agent {
       console.log(`[agent] <- ${type} [${aid || ''}]`);
     }
 
+    const interactionCmd = ['click', 'scroll', 'move_mouse', 'type_text', 'key_press', 'inspect_element', 'stop_analysis'];
+    if (interactionCmd.includes(type) && aid && !this.browserManager.hasSession(aid)) {
+      return;
+    }
+
     try {
       switch (type) {
         case 'navigate':
