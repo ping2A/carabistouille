@@ -21,6 +21,10 @@ pub struct AppState {
     pub agent_cmd_tx: broadcast::Sender<AgentCommand>,
     pub viewer_channels: Arc<DashMap<String, broadcast::Sender<String>>>,
     pub agent_connected: Arc<AtomicBool>,
+    /// When true, the agent was started by the server in Docker; /api/status exposes run_mode and chrome_mode.
+    pub docker_agent: bool,
+    /// When docker_agent is true: true = real Chrome (headed), false = headless.
+    pub real_chrome: bool,
     /// Per-analysis timeout task: when it fires, server sends StopAnalysis. Aborted when analysis completes or is stopped.
     pub analysis_timeouts: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     /// Channel to send persistence ops to the SQLite thread. Fire-and-forget; failures are logged in the DB thread.
@@ -29,7 +33,13 @@ pub struct AppState {
 
 impl AppState {
     /// Create new state: preload analyses into the map, broadcast channel for agent commands, no viewers, no timeouts, DB sender.
-    pub fn new(analyses: Vec<Analysis>, db_tx: std::sync::mpsc::Sender<DbOp>) -> Self {
+    /// When docker_agent is true, run_mode/chrome_mode are exposed in /api/status.
+    pub fn new(
+        analyses: Vec<Analysis>,
+        db_tx: std::sync::mpsc::Sender<DbOp>,
+        docker_agent: bool,
+        real_chrome: bool,
+    ) -> Self {
         let (agent_cmd_tx, _) = broadcast::channel(1024);
         let analyses_map = Arc::new(DashMap::new());
         for a in analyses {
@@ -40,6 +50,8 @@ impl AppState {
             agent_cmd_tx,
             viewer_channels: Arc::new(DashMap::new()),
             agent_connected: Arc::new(AtomicBool::new(false)),
+            docker_agent,
+            real_chrome,
             analysis_timeouts: Arc::new(DashMap::new()),
             db_tx: Arc::new(db_tx),
         }

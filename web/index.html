@@ -30,10 +30,14 @@
         </select>
       </div>
       <a href="/admin.html" class="header-link" data-i18n="app.admin">Admin</a>
-      <span id="agent-status" class="status disconnected">
-        <span class="status-dot"></span>
-        <span class="status-text" data-i18n="app.agentDisconnected">Agent disconnected</span>
-      </span>
+      <div id="agent-info" class="agent-info">
+        <span id="agent-status" class="status disconnected">
+          <span class="status-dot"></span>
+          <span class="status-text" data-i18n="app.agentDisconnected">Agent disconnected</span>
+        </span>
+        <span id="agent-mode" class="agent-mode" style="display:none" aria-hidden="true"></span>
+        <span id="agent-engine" class="agent-engine" style="display:none" aria-hidden="true"></span>
+      </div>
     </div>
   </header>
 
@@ -117,9 +121,6 @@
       <div class="report-header">
         <h2 data-i18n="app.report">Report</h2>
         <div class="report-badges">
-          <div id="engine-badge" class="engine-badge" style="display:none">
-            <span id="engine-name" class="engine-name"></span>
-          </div>
           <div id="risk-badge" class="risk-badge" style="display:none">
             <span id="risk-score" class="risk-score">0</span>
           </div>

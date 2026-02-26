@@ -62,6 +62,8 @@ pub enum AgentEvent {
         title: Option<String>,
         #[serde(default)]
         engine: Option<String>,
+        #[serde(default)]
+        headless: Option<bool>,
     },
     AnalysisComplete {
         analysis_id: String,

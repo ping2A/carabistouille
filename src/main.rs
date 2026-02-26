@@ -122,7 +122,7 @@ async fn main() {
     let (db_tx, _db_handle) = carabistouille::db::run_db_thread(&db_path)
         .expect("Failed to start SQLite DB thread");
 
-    let state = AppState::new(analyses, db_tx);
+    let state = AppState::new(analyses, db_tx, cli.docker_agent, cli.real_chrome);
     let app = build_router(state);
 
     let port: u16 = std::env::var("PORT")

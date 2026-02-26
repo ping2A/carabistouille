@@ -100,8 +100,8 @@ class App {
     this.pageUrl = document.getElementById('page-url');
     this.riskBadge = document.getElementById('risk-badge');
     this.riskScoreEl = document.getElementById('risk-score');
-    this.engineBadge = document.getElementById('engine-badge');
-    this.engineNameEl = document.getElementById('engine-name');
+    this.agentModeEl = document.getElementById('agent-mode');
+    this.agentEngineEl = document.getElementById('agent-engine');
   }
 
   /** Form submit, tool buttons, stop, proxy toggle, tab clicks, search inputs, viewport click/scroll/mousemove, keyboard, resizer. */
@@ -414,8 +414,9 @@ class App {
     this.renderSecurityPanel();
     this.renderDetectionPanel();
     this.engine = null;
+    this.headless = null;
     this.riskBadge.style.display = 'none';
-    this.engineBadge.style.display = 'none';
+    this.updateAgentHeaderInfo();
     this.stopBtn.style.display = 'none';
     this.pageUrl.textContent = '';
     this.inspectHighlight.style.display = 'none';
@@ -468,6 +469,7 @@ class App {
         this.redirectChain = r.redirect_chain || [];
         this.finalUrl = r.final_url || null;
         this.engine = r.engine || null;
+        this.headless = r.headless ?? null;
 
         const allTimestamps = [
           ...this.networkRequests.map(r => r.timestamp),
@@ -486,6 +488,7 @@ class App {
         this.renderDetectionPanel();
         this.updateEngineBadge();
         this.updateRiskBadge();
+        this.updateAgentHeaderInfo();
       }
 
       if (analysis.status === 'complete' || analysis.status === 'error') {
@@ -643,6 +646,7 @@ class App {
           if (r.redirect_chain?.length) this.redirectChain = r.redirect_chain;
           if (r.final_url) this.finalUrl = r.final_url;
           if (r.engine) this.engine = r.engine;
+          if (r.headless !== undefined) this.headless = r.headless;
 
           const allTimestamps = [
             ...this.networkRequests.map(x => x.timestamp),
@@ -660,6 +664,10 @@ class App {
           this.updateRiskBadge();
           this.updateEngineBadge();
         }
+        if (event.engine) this.engine = event.engine;
+        if (event.headless !== undefined) this.headless = event.headless;
+        this.updateEngineBadge();
+        this.updateAgentHeaderInfo();
         if (event.status === 'pending' || event.status === 'running') {
           this.updateStopButton(event.status);
         }
@@ -678,10 +686,10 @@ class App {
         if (event.title) {
           document.title = `${event.title} — Carabistouille`;
         }
-        if (event.engine) {
-          this.engine = event.engine;
-          this.updateEngineBadge();
-        }
+        if (event.engine) this.engine = event.engine;
+        if (event.headless !== undefined) this.headless = event.headless;
+        this.updateEngineBadge();
+        this.updateAgentHeaderInfo();
         this.updateStopButton('running');
         this.loadAnalyses();
         break;
@@ -703,6 +711,7 @@ class App {
           if (event.report.redirect_chain?.length) this.redirectChain = event.report.redirect_chain;
           if (event.report.final_url) this.finalUrl = event.report.final_url;
           if (event.report.engine) this.engine = event.report.engine;
+          if (event.report.headless !== undefined) this.headless = event.report.headless;
           this.security = event.report.security || null;
           this.riskScore = event.report.risk_score;
           this.riskFactors = event.report.risk_factors || [];
@@ -714,6 +723,7 @@ class App {
           this.renderDetectionPanel();
           this.updateRiskBadge();
           this.updateEngineBadge();
+          this.updateAgentHeaderInfo();
         }
         this.loadScreenshotTimeline();
         this.loadAnalyses();
@@ -777,16 +787,42 @@ class App {
   }
 
   updateEngineBadge() {
+    if (!this.agentEngineEl) return;
     if (!this.engine) {
-      this.engineBadge.style.display = 'none';
+      this.agentEngineEl.style.display = 'none';
       return;
     }
     const labels = {
       'puppeteer': 'Puppeteer',
       'puppeteer-extra': 'Puppeteer Extra + Stealth',
     };
-    this.engineBadge.style.display = 'inline-flex';
-    this.engineNameEl.textContent = labels[this.engine] || this.engine;
+    this.agentEngineEl.textContent = labels[this.engine] || this.engine;
+    this.agentEngineEl.style.display = 'inline';
+  }
+
+  /** Update header agent mode and engine labels from run_mode, chrome_mode (from /api/status) and engine/headless (from analysis). */
+  updateAgentHeaderInfo() {
+    if (!this.agentModeEl || !this.agentEngineEl) return;
+    const connected = this.agentStatus?.classList.contains('connected');
+    if (!connected) {
+      this.agentModeEl.style.display = 'none';
+      this.agentEngineEl.style.display = 'none';
+      return;
+    }
+    let modeText = '';
+    if (this.runMode === 'docker') {
+      modeText = this.chromeMode === 'real' ? 'Docker + real Chrome' : 'Docker + headless';
+    } else {
+      if (this.headless === false) modeText = 'Local + real Chrome';
+      else if (this.headless === true) modeText = 'Local + headless';
+      else modeText = 'Local';
+    }
+    this.agentModeEl.textContent = modeText;
+    this.agentModeEl.style.display = 'inline';
+    const engineLabels = { 'puppeteer': 'Puppeteer', 'puppeteer-extra': 'Puppeteer Extra + Stealth' };
+    const engineText = this.engine ? (engineLabels[this.engine] || this.engine) : '—';
+    this.agentEngineEl.textContent = engineText;
+    this.agentEngineEl.style.display = 'inline';
   }
 
   /** Render Network tab with type filters, resource type badges, and expandable request details. */
@@ -1986,6 +2022,8 @@ class App {
         const res = await fetch('/api/status');
         const data = await res.json();
 
+        this.runMode = data.run_mode || 'local';
+        this.chromeMode = data.chrome_mode ?? null;
         if (data.agent_connected) {
           this.agentStatus.classList.remove('disconnected');
           this.agentStatus.classList.add('connected');
@@ -1997,11 +2035,13 @@ class App {
           this.statusText.textContent = this.t('app.agentDisconnected');
           this.submitBtn.disabled = true;
         }
+        this.updateAgentHeaderInfo();
       } catch {
         this.agentStatus.classList.remove('connected');
         this.agentStatus.classList.add('disconnected');
         this.statusText.textContent = this.t('app.serverUnreachable');
         this.submitBtn.disabled = true;
+        this.updateAgentHeaderInfo();
       }
     };
 

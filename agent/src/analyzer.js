@@ -267,6 +267,7 @@ export class Analyzer {
         url: finalUrl,
         title,
         engine: config.browser.engine || 'puppeteer',
+        headless: config.browser.headless !== false,
       });
 
       try {
@@ -653,6 +654,7 @@ export class Analyzer {
         risk_score: riskScore,
         risk_factors: riskFactors,
         engine: config.browser.engine || 'puppeteer',
+        headless: config.browser.headless !== false,
       },
     });
   }

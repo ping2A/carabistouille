@@ -99,6 +99,8 @@ pub struct AnalysisReport {
     pub detection_attempts: Vec<DetectionAttempt>,
     #[serde(default)]
     pub engine: Option<String>,
+    #[serde(default)]
+    pub headless: Option<bool>,
 }
 
 /// One redirect step (from URL → to URL, HTTP status).

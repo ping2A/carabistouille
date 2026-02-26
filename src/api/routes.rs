@@ -32,10 +32,18 @@ pub struct CreateAnalysisResponse {
     pub status: AnalysisStatus,
 }
 
-/// GET /api/status — agent connected flag and total analyses count.
+/// GET /api/status — agent connected flag, run mode, chrome mode, and total analyses count.
 pub async fn get_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let run_mode = if state.docker_agent { "docker" } else { "local" };
+    let chrome_mode: Option<&str> = if state.docker_agent {
+        Some(if state.real_chrome { "real" } else { "headless" })
+    } else {
+        None
+    };
     Json(serde_json::json!({
         "agent_connected": state.agent_connected.load(Ordering::Relaxed),
+        "run_mode": run_mode,
+        "chrome_mode": chrome_mode,
         "analyses_count": state.analyses.len(),
     }))
 }

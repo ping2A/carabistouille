@@ -215,13 +215,15 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             url,
             title,
             engine,
+            headless,
         } => {
             tracing::info!(
-                "Navigation complete for {}: url={} title={:?} engine={:?}",
+                "Navigation complete for {}: url={} title={:?} engine={:?} headless={:?}",
                 analysis_id,
                 url,
                 title,
-                engine
+                engine,
+                headless
             );
             if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
                 analysis.status = AnalysisStatus::Running;
@@ -230,6 +232,9 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 report.page_title = title.clone();
                 if engine.is_some() {
                     report.engine = engine.clone();
+                }
+                if headless.is_some() {
+                    report.headless = headless.clone();
                 }
             }
             forward_to_viewer(state, analysis_id, &event);
