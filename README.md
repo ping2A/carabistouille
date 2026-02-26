@@ -1,3 +1,5 @@
+<p align="center"><img width="240" src="./web/logo.png"></p>
+
 # Carabistouille
 
 A malicious URL analyzer with remote browser instrumentation. Submit suspicious URLs, watch the page load in a sandboxed headless Chromium, interact with it remotely, and get a detailed security report with risk scoring.
