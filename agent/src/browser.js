@@ -260,6 +260,12 @@ export class BrowserManager {
         } catch (_) {}
       });
 
+      // 6b. window.outerWidth/outerHeight (detect-headless: "Outer Dimension" — 0 in headless)
+      try {
+        Object.defineProperty(window, 'outerWidth', { get: () => vw, configurable: true });
+        Object.defineProperty(window, 'outerHeight', { get: () => vh, configurable: true });
+      } catch (_) {}
+
       // 7. Remove automation artifacts on document (Selenium, CDP, etc.)
       const artifactPrefixes = ['$cdc_', '__webdriver_', '__driver_', '__selenium_', '__fxdriver_', '__nightmare_', '_Selenium_IDE_', '_WEBDRIVER_ELEM_CACHE_', 'callSelenium_', '__$webdriverAsyncExecutor_', '__lastWatirAlert_', '__lastWatirConfirm_', '__lastWatirPrompt_', 'webdriver'];
       artifactPrefixes.forEach((prefix) => {
@@ -377,6 +383,12 @@ export class BrowserManager {
           Object.defineProperty(screen, k, { get: () => screenOverrides[k], configurable: true });
         } catch (_) {}
       });
+
+      // window.outerWidth/outerHeight (detect-headless "Outer Dimension" — 0 in headless)
+      try {
+        Object.defineProperty(window, 'outerWidth', { get: () => vw, configurable: true });
+        Object.defineProperty(window, 'outerHeight', { get: () => vh, configurable: true });
+      } catch (_) {}
 
       // Remove automation artifacts ($cdc_, __webdriver_, etc.)
       const artifactPrefixes = ['$cdc_', '__webdriver_', '__driver_', '__selenium_', '__fxdriver_', '__nightmare_', '_Selenium_IDE_', '_WEBDRIVER_ELEM_CACHE_', 'callSelenium_', '__$webdriverAsyncExecutor_', '__lastWatirAlert_', '__lastWatirConfirm_', '__lastWatirPrompt_', 'webdriver'];
