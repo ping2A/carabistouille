@@ -1,4 +1,15 @@
 /**
+ * Preset User-Agent strings for simulating different devices/browsers.
+ * Used when "User agent" selector is not Default or Custom.
+ */
+const USER_AGENT_PRESETS = {
+  'chrome-desktop': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'safari-iphone': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+  'chrome-android': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+  'firefox-desktop': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+};
+
+/**
  * Main dashboard UI: URL submit, analysis list, viewer WebSocket, viewport interaction,
  * report panels (Network, Scripts, Console, Raw, Screenshots, Security), risk badge.
  */
@@ -30,10 +41,38 @@ class App {
 
     this.initElements();
     this.initEventListeners();
+    if (window.i18n) {
+      window.i18n.applyTheme();
+      window.i18n.applyLang();
+      window.onLangChange = () => this.onLangChange();
+    }
     this.loadAnalyses();
     this.pollAgentStatus();
 
     console.log('[ui] App initialized');
+  }
+
+  t(key) {
+    return window.i18n ? window.i18n.t(key) : key;
+  }
+
+  onLangChange() {
+    this.updateAgentStatusText();
+    this.renderNetworkPanel();
+    this.renderScriptsPanel();
+    this.renderConsolePanel();
+    this.renderRawPanel();
+    this.renderScreenshotsPanel();
+    this.renderSecurityPanel();
+  }
+
+  updateAgentStatusText() {
+    if (!this.agentStatus || !this.statusText) return;
+    if (this.agentStatus.classList.contains('connected')) {
+      this.statusText.textContent = this.t('app.agentConnected');
+    } else {
+      this.statusText.textContent = this.t('app.agentDisconnected');
+    }
   }
 
   /** Cache DOM references for form, viewport, panels, buttons. */
@@ -42,6 +81,9 @@ class App {
     this.urlInput = document.getElementById('url-input');
     this.proxyInput = document.getElementById('proxy-input');
     this.proxyToggle = document.getElementById('proxy-toggle');
+    this.userAgentSelect = document.getElementById('user-agent-select');
+    this.userAgentCustomRow = document.getElementById('user-agent-custom-row');
+    this.userAgentCustomInput = document.getElementById('user-agent-custom');
     this.submitBtn = document.getElementById('submit-btn');
     this.stopBtn = document.getElementById('stop-btn');
     this.analysesList = document.getElementById('analyses-list');
@@ -87,6 +129,13 @@ class App {
       if (!active) this.proxyInput.value = '';
     });
     this.proxyInput.disabled = true;
+
+    if (this.userAgentSelect) {
+      this.userAgentSelect.addEventListener('change', () => {
+        const isCustom = this.userAgentSelect.value === 'custom';
+        if (this.userAgentCustomRow) this.userAgentCustomRow.style.display = isCustom ? 'block' : 'none';
+      });
+    }
 
     document.querySelectorAll('.report-tabs .tab').forEach((tab) => {
       tab.addEventListener('click', () => {
@@ -203,11 +252,16 @@ class App {
     if (!url) return;
 
     const proxy = this.proxyInput.value.trim() || undefined;
-    console.log(`[ui] Submitting URL: ${url}${proxy ? ` via proxy ${proxy}` : ''}`);
+    const userAgentValue = this.userAgentSelect?.value || '';
+    const userAgent = userAgentValue === 'custom'
+      ? (this.userAgentCustomInput?.value.trim() || undefined)
+      : (USER_AGENT_PRESETS[userAgentValue] || undefined);
+    console.log(`[ui] Submitting URL: ${url}${proxy ? ` via proxy ${proxy}` : ''}${userAgent ? ' with custom UA' : ''}`);
     this.submitBtn.disabled = true;
     try {
       const body = { url };
       if (proxy) body.proxy = proxy;
+      if (userAgent) body.user_agent = userAgent;
       const res = await fetch('/api/analyses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -674,7 +728,7 @@ class App {
     document.getElementById('count-network').textContent = this.networkRequests.length;
 
     if (this.networkRequests.length === 0) {
-      list.innerHTML = '<div class="panel-empty">No network data yet</div>';
+      list.innerHTML = '<div class="panel-empty">' + this.t('app.noNetwork') + '</div>';
       return;
     }
 
@@ -699,10 +753,10 @@ class App {
           <div class="net-url-wrap">
             <span class="net-url-full ${thirdPartyClass}">${this.esc(r.url)}</span>
             <span class="net-actions">
-              <button class="icon-btn copy-btn" data-url="${this.esc(r.url)}" title="Copy URL">
+              <button class="icon-btn copy-btn" data-url="${this.esc(r.url)}" title="${this.t('app.copyUrl')}">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
               </button>
-              ${scriptMatch ? `<button class="icon-btn js-btn" data-script-url="${this.esc(r.url)}" title="View JS source locally">JS</button>` : ''}
+              ${scriptMatch ? `<button class="icon-btn js-btn" data-script-url="${this.esc(r.url)}" title="${this.t('app.viewJs')}">JS</button>` : ''}
             </span>
           </div>
           ${ct ? `<span class="net-type">${this.esc(ct.split(';')[0])}</span>` : ''}
@@ -734,7 +788,7 @@ class App {
     document.getElementById('count-scripts').textContent = this.scripts.length;
 
     if (this.scripts.length === 0) {
-      list.innerHTML = '<div class="panel-empty">No scripts detected</div>';
+      list.innerHTML = '<div class="panel-empty">' + this.t('app.noScripts') + '</div>';
       return;
     }
 
@@ -850,7 +904,7 @@ class App {
     document.getElementById('count-console').textContent = this.consoleLogs.length;
 
     if (this.consoleLogs.length === 0) {
-      list.innerHTML = '<div class="panel-empty">No console output</div>';
+      list.innerHTML = '<div class="panel-empty">' + this.t('app.noConsole') + '</div>';
       return;
     }
 
@@ -874,7 +928,7 @@ class App {
     document.getElementById('count-raw').textContent = totalCount;
 
     if (this.rawFiles.length === 0 && !this.pageSource && !this.domSnapshot) {
-      list.innerHTML = '<div class="panel-empty">No files captured yet</div>';
+      list.innerHTML = '<div class="panel-empty">' + this.t('app.noFiles') + '</div>';
       return;
     }
 
@@ -1110,7 +1164,7 @@ class App {
     if (this.screenshotTimeline.length === 0) {
       const msg = this.screenshotTimelineCount > 0
         ? `${this.screenshotTimelineCount} screenshots available — click to load`
-        : 'No screenshots captured yet';
+        : this.t('app.noScreenshots');
       list.innerHTML = `<div class="panel-empty ss-load-prompt">${msg}</div>`;
       if (this.screenshotTimelineCount > 0) {
         list.querySelector('.ss-load-prompt').style.cursor = 'pointer';
@@ -1250,7 +1304,7 @@ class App {
       (this.storageCapture && (this.storageCapture.cookies?.length || this.storageCapture.local_storage?.length || this.storageCapture.session_storage?.length)) ||
       this.securityHeaders.length > 0 || this.redirectChain.length > 0;
     if (!hasAny) {
-      panel.innerHTML = '<div class="panel-empty">No security analysis yet</div>';
+      panel.innerHTML = '<div class="panel-empty">' + this.t('app.noSecurity') + '</div>';
       return;
     }
 
@@ -1511,18 +1565,18 @@ class App {
         if (data.agent_connected) {
           this.agentStatus.classList.remove('disconnected');
           this.agentStatus.classList.add('connected');
-          this.statusText.textContent = 'Agent connected';
+          this.statusText.textContent = this.t('app.agentConnected');
           this.submitBtn.disabled = false;
         } else {
           this.agentStatus.classList.remove('connected');
           this.agentStatus.classList.add('disconnected');
-          this.statusText.textContent = 'Agent disconnected';
+          this.statusText.textContent = this.t('app.agentDisconnected');
           this.submitBtn.disabled = true;
         }
       } catch {
         this.agentStatus.classList.remove('connected');
         this.agentStatus.classList.add('disconnected');
-        this.statusText.textContent = 'Server unreachable';
+        this.statusText.textContent = this.t('app.serverUnreachable');
         this.submitBtn.disabled = true;
       }
     };

@@ -12,8 +12,8 @@ export class BrowserManager {
     this.viewportHeight = config.browser.viewportHeight;
   }
 
-  /** Start a new Chromium for this analysis (closing any existing one). Optional proxy. Returns the page. */
-  async createSession(analysisId, proxy = null) {
+  /** Start a new Chromium for this analysis (closing any existing one). Optional proxy and userAgent. Returns the page. */
+  async createSession(analysisId, proxy = null, userAgent = null) {
     await this.closeSession(analysisId);
 
     const args = [
@@ -31,6 +31,13 @@ export class BrowserManager {
       ignoreHTTPSErrors: config.browser.ignoreHTTPSErrors,
     });
     const page = await browser.newPage();
+
+    if (userAgent) {
+      await page.setUserAgent(userAgent);
+      const uaPreview = userAgent.length > 50 ? userAgent.substring(0, 50) + '...' : userAgent;
+      console.log(`[browser] User-Agent set for ${analysisId}: ${uaPreview}`);
+    }
+
     await page.setViewport({ width: this.viewportWidth, height: this.viewportHeight });
 
     if (config.browser.bypassCSP) {
@@ -38,7 +45,7 @@ export class BrowserManager {
     }
 
     this.sessions.set(analysisId, { browser, page, proxy });
-    console.log(`[browser] Session created for ${analysisId} (proxy: ${proxy || 'none'}, active: ${this.sessions.size})`);
+    console.log(`[browser] Session created for ${analysisId} (proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
     return page;
   }
 

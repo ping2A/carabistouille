@@ -1,6 +1,7 @@
 //! Server entry point: TLS resolution, router, and HTTP/HTTPS listen loop.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use carabistouille::{build_router, AppState};
 use tracing_subscriber::EnvFilter;
@@ -60,7 +61,21 @@ async fn main() {
         )
         .init();
 
-    let state = AppState::new();
+    let db_path: PathBuf = std::env::var("DATABASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("carabistouille.db"));
+
+    let analyses = carabistouille::db::load_analyses(&db_path)
+        .unwrap_or_else(|e| {
+            tracing::warn!("Could not load analyses from {:?}: {} — starting with empty list", db_path, e);
+            Vec::new()
+        });
+    tracing::info!("Loaded {} analyses from {:?}", analyses.len(), db_path);
+
+    let (db_tx, _db_handle) = carabistouille::db::run_db_thread(&db_path)
+        .expect("Failed to start SQLite DB thread");
+
+    let state = AppState::new(analyses, db_tx);
     let app = build_router(state);
 
     let port: u16 = std::env::var("PORT")

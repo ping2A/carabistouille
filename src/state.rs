@@ -1,4 +1,4 @@
-//! Shared application state: analyses store, agent command channel, viewer channels, analysis timeouts.
+//! Shared application state: analyses store, agent command channel, viewer channels, analysis timeouts, DB persistence.
 
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::broadcast;
 
+use crate::db::DbOp;
 use crate::models::Analysis;
 use crate::protocol::AgentCommand;
 
@@ -22,19 +23,36 @@ pub struct AppState {
     pub agent_connected: Arc<AtomicBool>,
     /// Per-analysis timeout task: when it fires, server sends StopAnalysis. Aborted when analysis completes or is stopped.
     pub analysis_timeouts: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Channel to send persistence ops to the SQLite thread. Fire-and-forget; failures are logged in the DB thread.
+    pub db_tx: Arc<std::sync::mpsc::Sender<DbOp>>,
 }
 
 impl AppState {
-    /// Create new state: empty analyses map, broadcast channel for agent commands, no viewers, no timeouts.
-    pub fn new() -> Self {
+    /// Create new state: preload analyses into the map, broadcast channel for agent commands, no viewers, no timeouts, DB sender.
+    pub fn new(analyses: Vec<Analysis>, db_tx: std::sync::mpsc::Sender<DbOp>) -> Self {
         let (agent_cmd_tx, _) = broadcast::channel(1024);
+        let analyses_map = Arc::new(DashMap::new());
+        for a in analyses {
+            analyses_map.insert(a.id.clone(), a);
+        }
         Self {
-            analyses: Arc::new(DashMap::new()),
+            analyses: analyses_map,
             agent_cmd_tx,
             viewer_channels: Arc::new(DashMap::new()),
             agent_connected: Arc::new(AtomicBool::new(false)),
             analysis_timeouts: Arc::new(DashMap::new()),
+            db_tx: Arc::new(db_tx),
         }
+    }
+
+    /// Persist an analysis (insert or update). Does not block the async runtime.
+    pub fn persist_analysis(&self, analysis: Analysis) {
+        let _ = self.db_tx.send(DbOp::Update(analysis));
+    }
+
+    /// Remove analysis from DB. Does not block the async runtime.
+    pub fn persist_delete(&self, analysis_id: &str) {
+        let _ = self.db_tx.send(DbOp::Delete(analysis_id.to_string()));
     }
 
     /// Cancel the timeout task for this analysis (on complete, error, or user stop). No-op if none.

@@ -16,11 +16,12 @@ use crate::models::{Analysis, AnalysisStatus};
 use crate::protocol::AgentCommand;
 use crate::state::{AppState, DEFAULT_ANALYSIS_TIMEOUT_SECS};
 
-/// Request body for POST /api/analyses (url required, proxy optional).
+/// Request body for POST /api/analyses (url required; proxy and user_agent optional).
 #[derive(Deserialize)]
 pub struct CreateAnalysisRequest {
     pub url: String,
     pub proxy: Option<String>,
+    pub user_agent: Option<String>,
 }
 
 /// Response for POST /api/analyses (id, url, status).
@@ -63,12 +64,14 @@ pub async fn create_analysis(
         screenshot_timeline: Vec::new(),
     };
 
-    state.analyses.insert(id.clone(), analysis);
+    state.analyses.insert(id.clone(), analysis.clone());
+    state.persist_analysis(analysis);
 
     let _ = state.agent_cmd_tx.send(AgentCommand::Navigate {
         analysis_id: id.clone(),
         url: req.url.clone(),
         proxy: req.proxy.clone(),
+        user_agent: req.user_agent.clone(),
     });
 
     // Force-stop analysis after 5 minutes if still running
@@ -180,6 +183,7 @@ pub async fn delete_analysis(
     if state.analyses.remove(&id).is_some() {
         state.viewer_channels.remove(&id);
         state.cancel_analysis_timeout(&id);
+        state.persist_delete(&id);
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND

@@ -12,7 +12,12 @@ use crate::models::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentCommand {
-    Navigate { analysis_id: String, url: String, proxy: Option<String> },
+    Navigate {
+        analysis_id: String,
+        url: String,
+        proxy: Option<String>,
+        user_agent: Option<String>,
+    },
     Click { analysis_id: String, x: f64, y: f64 },
     Scroll { analysis_id: String, delta_x: f64, delta_y: f64 },
     MoveMouse { analysis_id: String, x: f64, y: f64 },

@@ -16,6 +16,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"
 futures = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rcgen = "0.14"
 

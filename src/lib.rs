@@ -1,6 +1,7 @@
 //! Carabistouille library: router builder and shared state for the URL analyzer server.
 
 mod api;
+pub mod db;
 pub mod models;
 mod protocol;
 mod state;

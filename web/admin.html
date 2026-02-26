@@ -6,18 +6,29 @@
   <title>Admin &mdash; Carabistouille</title>
   <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="admin.css">
+  <script src="i18n.js"></script>
 </head>
-<body class="admin-body">
+<body class="admin-body theme-dark">
   <header>
     <div class="header-left">
-      <h1>Carabistouille</h1>
-      <span class="subtitle">Admin Dashboard</span>
+      <h1 data-i18n="app.title">Carabistouille</h1>
+      <span class="subtitle" data-i18n="admin.dashboard">Admin Dashboard</span>
     </div>
     <div class="header-right">
-      <a href="/" class="header-link">Analyzer</a>
+      <div class="header-controls">
+        <button type="button" id="theme-toggle" class="icon-btn header-icon-btn" title="Toggle theme" aria-label="Theme">
+          <span class="theme-icon">🌙</span>
+        </button>
+        <select id="lang-select" class="lang-select" aria-label="Language">
+          <option value="en">EN</option>
+          <option value="fr">FR</option>
+          <option value="zh">中文</option>
+        </select>
+      </div>
+      <a href="/" class="header-link" data-i18n="app.analyzer">Analyzer</a>
       <span id="agent-status" class="status disconnected">
         <span class="status-dot"></span>
-        <span class="status-text">Agent disconnected</span>
+        <span class="status-text" data-i18n="app.agentDisconnected">Agent disconnected</span>
       </span>
     </div>
   </header>
@@ -28,7 +39,7 @@
       <div class="admin-actions">
         <button id="refresh-btn" class="action-btn">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          Refresh
+          <span data-i18n="admin.refresh">Refresh</span>
         </button>
       </div>
     </div>
@@ -37,26 +48,26 @@
       <table class="admin-table" id="analyses-table">
         <thead>
           <tr>
-            <th>Status</th>
-            <th>URL</th>
-            <th>Created</th>
-            <th>Completed</th>
-            <th>Risk</th>
-            <th>Requests</th>
-            <th>Scripts</th>
-            <th>Redirects</th>
-            <th>Actions</th>
+            <th data-i18n="admin.status">Status</th>
+            <th data-i18n="admin.url">URL</th>
+            <th data-i18n="admin.created">Created</th>
+            <th data-i18n="admin.completed">Completed</th>
+            <th data-i18n="admin.risk">Risk</th>
+            <th data-i18n="admin.requests">Requests</th>
+            <th data-i18n="admin.scripts">Scripts</th>
+            <th data-i18n="admin.redirects">Redirects</th>
+            <th data-i18n="admin.actions">Actions</th>
           </tr>
         </thead>
         <tbody id="analyses-tbody"></tbody>
       </table>
-      <div class="admin-empty" id="admin-empty" style="display:none">No analyses yet</div>
+      <div class="admin-empty" id="admin-empty" style="display:none" data-i18n="admin.noAnalyses">No analyses yet</div>
     </div>
 
     <div class="admin-detail" id="admin-detail" style="display:none">
       <div class="detail-header">
-        <h2 id="detail-title">Analysis Details</h2>
-        <button id="detail-close" class="detail-close">&times;</button>
+        <h2 id="detail-title" data-i18n="admin.detailTitle">Analysis Details</h2>
+        <button id="detail-close" class="detail-close" data-i18n-title="app.close" title="Close">&times;</button>
       </div>
       <div class="detail-body" id="detail-body"></div>
     </div>

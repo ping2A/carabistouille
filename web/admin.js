@@ -4,9 +4,33 @@ class AdminApp {
     this.selectedId = null;
     this.initElements();
     this.initEventListeners();
+    if (window.i18n) {
+      window.i18n.applyTheme();
+      window.i18n.applyLang();
+      window.onLangChange = () => this.onLangChange();
+    }
     this.refresh();
     this.pollAgentStatus();
     setInterval(() => this.refresh(), 5000);
+  }
+
+  t(key) {
+    return window.i18n ? window.i18n.t(key) : key;
+  }
+
+  onLangChange() {
+    this.renderStats();
+    this.renderTable();
+    this.updateAgentStatusText();
+  }
+
+  updateAgentStatusText() {
+    if (!this.agentStatus || !this.statusText) return;
+    if (this.agentStatus.classList.contains('connected')) {
+      this.statusText.textContent = this.t('app.agentConnected');
+    } else if (this.agentStatus.classList.contains('disconnected')) {
+      this.statusText.textContent = this.t('app.agentDisconnected');
+    }
   }
 
   initElements() {
@@ -48,23 +72,23 @@ class AdminApp {
     this.statsEl.innerHTML = `
       <div class="stat-card">
         <div class="stat-value">${total}</div>
-        <div class="stat-label">Total</div>
+        <div class="stat-label">${this.t('admin.total')}</div>
       </div>
       <div class="stat-card stat-running">
         <div class="stat-value">${running}</div>
-        <div class="stat-label">Active</div>
+        <div class="stat-label">${this.t('admin.active')}</div>
       </div>
       <div class="stat-card stat-complete">
         <div class="stat-value">${complete}</div>
-        <div class="stat-label">Complete</div>
+        <div class="stat-label">${this.t('admin.complete')}</div>
       </div>
       <div class="stat-card stat-error">
         <div class="stat-value">${errors}</div>
-        <div class="stat-label">Errors</div>
+        <div class="stat-label">${this.t('admin.errors')}</div>
       </div>
       <div class="stat-card">
         <div class="stat-value">${avgRisk}<span class="stat-unit">/100</span></div>
-        <div class="stat-label">Avg Risk</div>
+        <div class="stat-label">${this.t('admin.avgRisk')}</div>
       </div>
     `;
   }
@@ -97,10 +121,10 @@ class AdminApp {
           <td class="num-cell">${scripts}</td>
           <td class="num-cell">${redirects}</td>
           <td class="actions-cell">
-            <button class="row-btn view-btn" data-id="${a.id}" title="View details">
+            <button class="row-btn view-btn" data-id="${a.id}" title="${this.t('admin.viewDetails')}">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
-            <button class="row-btn delete-btn" data-id="${a.id}" title="Delete analysis">
+            <button class="row-btn delete-btn" data-id="${a.id}" title="${this.t('admin.deleteAnalysis')}">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
             </button>
           </td>
@@ -260,13 +284,19 @@ class AdminApp {
   }
 
   async deleteAnalysis(id) {
-    if (!confirm('Delete this analysis?')) return;
+    if (!confirm(this.t('admin.deleteConfirm'))) return;
     try {
-      await fetch(`/api/analyses/${id}`, { method: 'DELETE' });
-      if (this.selectedId === id) this.closeDetail();
-      this.refresh();
+      const res = await fetch(`/api/analyses/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        if (this.selectedId === id) this.closeDetail();
+        this.refresh();
+      } else {
+        const msg = res.status === 404 ? 'Analysis not found.' : `Delete failed (${res.status}).`;
+        alert(msg);
+      }
     } catch (err) {
       console.error('[admin] Delete failed:', err);
+      alert('Delete failed: ' + (err.message || 'network error'));
     }
   }
 
@@ -290,16 +320,16 @@ class AdminApp {
         if (data.agent_connected) {
           this.agentStatus.classList.remove('disconnected');
           this.agentStatus.classList.add('connected');
-          this.statusText.textContent = 'Agent connected';
+          this.statusText.textContent = this.t('app.agentConnected');
         } else {
           this.agentStatus.classList.remove('connected');
           this.agentStatus.classList.add('disconnected');
-          this.statusText.textContent = 'Agent disconnected';
+          this.statusText.textContent = this.t('app.agentDisconnected');
         }
       } catch {
         this.agentStatus.classList.remove('connected');
         this.agentStatus.classList.add('disconnected');
-        this.statusText.textContent = 'Server unreachable';
+        this.statusText.textContent = this.t('admin.serverUnreachable');
       }
     };
     await check();
