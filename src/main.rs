@@ -13,12 +13,15 @@ struct CliArgs {
     docker_agent: bool,
     /// Browser engine passed into the Docker container (puppeteer | puppeteer-extra).
     browser_engine: String,
+    /// When using --docker-agent: run Chrome in headed mode (real Chrome) with Xvfb for better anti-detection.
+    real_chrome: bool,
 }
 
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let clean_db = args.iter().any(|a| a == "--clean-db");
     let docker_agent = args.iter().any(|a| a == "--docker-agent");
+    let real_chrome = args.iter().any(|a| a == "--real-chrome");
 
     let browser_engine = args
         .iter()
@@ -32,6 +35,7 @@ fn parse_args() -> CliArgs {
         clean_db,
         docker_agent,
         browser_engine,
+        real_chrome,
     }
 }
 
@@ -130,8 +134,9 @@ async fn main() {
     // --- Docker agent management ---
     let _docker_log_handle: Option<tokio::task::JoinHandle<()>> = if cli.docker_agent {
         tracing::info!(
-            "Docker agent mode enabled (engine={})",
-            cli.browser_engine
+            "Docker agent mode enabled (engine={}, real_chrome={})",
+            cli.browser_engine,
+            cli.real_chrome
         );
 
         let agent_dir = std::env::var("AGENT_DIR").unwrap_or_else(|_| "agent".to_string());
@@ -141,7 +146,7 @@ async fn main() {
             std::process::exit(1);
         }
 
-        match carabistouille::docker::start_container(port, &cli.browser_engine).await {
+        match carabistouille::docker::start_container(port, &cli.browser_engine, cli.real_chrome).await {
             Ok(_container_id) => {
                 tracing::info!("Docker agent container started — logs streaming below:");
                 Some(carabistouille::docker::stream_logs())

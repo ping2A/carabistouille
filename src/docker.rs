@@ -32,9 +32,11 @@ pub async fn ensure_image(agent_dir: &str) -> Result<(), String> {
 /// Start the agent container (removes any stale container first).
 /// `server_port` is the host port the server listens on.
 /// `browser_engine` selects puppeteer or puppeteer-extra inside the container.
+/// `real_chrome`: if true, run Chrome in headed mode (HEADLESS=false) with Xvfb for a more realistic browser.
 pub async fn start_container(
     server_port: u16,
     browser_engine: &str,
+    real_chrome: bool,
 ) -> Result<String, String> {
     // Remove stale container if any
     let _ = Command::new("docker")
@@ -47,28 +49,38 @@ pub async fn start_container(
     let server_url = format!("ws://host.docker.internal:{server_port}/ws/agent");
 
     tracing::info!(
-        "Starting Docker agent container '{}' (engine={}, server={})",
+        "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={})",
         CONTAINER_NAME,
         browser_engine,
         server_url,
+        real_chrome,
     );
 
+    let server_url_env = format!("SERVER_URL={server_url}");
+    let browser_engine_env = format!("BROWSER_ENGINE={browser_engine}");
+
+    let mut args = vec![
+        "run",
+        "-d",
+        "--platform",
+        "linux/amd64",
+        "--name",
+        CONTAINER_NAME,
+        "--add-host=host.docker.internal:host-gateway",
+        "--shm-size=512m",
+        "-e",
+        server_url_env.as_str(),
+        "-e",
+        browser_engine_env.as_str(),
+    ];
+    if real_chrome {
+        args.push("-e");
+        args.push("HEADLESS=false");
+    }
+    args.push(IMAGE_NAME);
+
     let output = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--platform",
-            "linux/amd64",
-            "--name",
-            CONTAINER_NAME,
-            "--add-host=host.docker.internal:host-gateway",
-            "--shm-size=512m",
-            "-e",
-            &format!("SERVER_URL={server_url}"),
-            "-e",
-            &format!("BROWSER_ENGINE={browser_engine}"),
-            IMAGE_NAME,
-        ])
+        .args(args)
         .output()
         .await
         .map_err(|e| format!("Failed to run docker run: {e}"))?;

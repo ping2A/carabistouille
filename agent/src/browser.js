@@ -82,8 +82,9 @@ export class BrowserManager {
     await this.installDetectionMonitors(page);
 
     const engine = useExtraStealth ? 'puppeteer-extra' : 'puppeteer';
+    const headlessLabel = config.browser.headless === false ? 'real Chrome (headed)' : 'headless';
     this.sessions.set(analysisId, { browser, page, proxy });
-    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
+    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, ${headlessLabel}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
     return page;
   }
 

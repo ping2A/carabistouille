@@ -11,17 +11,18 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
  | (Browser) | <---JSON/events------  |  (Axum+TLS)   | <----events------  |   (Node.js)      |
  +-----------+                        +---------------+                    +------------------+
    |       |                            |           |                        |              |
-   |  Analyst                      In-memory        |                   Headless          |
-   |  Dashboard                    DashMap store     |                   Chromium          |
+   |  Analyst                      In-memory        |                   Chromium           |
+   |  Dashboard                    DashMap store     |                   (headless or       |
+   |  (viewer WS)                   + SQLite         |                    headed / real)     |
    |       |                            |           |                        |              |
-   |  Admin                        Broadcast        |                   Puppeteer          |
-   |  Dashboard                    channels          |                   API               |
-   |                                    |           |                        |              |
-   +--- /index.html                     |      /ws/agent          Screenshots + Events     |
-   +--- /admin.html                     |      /ws/viewer/:id     Network capture          |
-                                        |                         Console logs             |
-                                   REST API                       Security scan            |
-                                   /api/*                         Risk scoring             |
+   |  Admin                        Broadcast        |                   Engine:             |
+   |  Dashboard                    channels        |                   puppeteer |         |
+   |                                    |           |                   puppeteer-extra     |
+   +--- /index.html                     |      /ws/agent          Screenshots (WebP)       |
+   +--- /admin.html                     |      /ws/viewer/:id     Network + Console       |
+                                        |      report_snapshot    Detection monitors      |
+                                   REST API  on viewer connect    Risk scoring            |
+                                   /api/*   fwd throttle 1s       Clipboard hooks        |
 ```
 
 ### Component Responsibilities
@@ -41,9 +42,10 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
 |  |       :id/stop   |  |  between viewer  |  |  (agent cmds,   | |
 |  |  GET  /analyses/ |  |  and agent       |  |   viewer evts)  | |
 |  |    :id/screenshots|  |                  |  |                 | |
-|  |  DELETE /analyses |  |  Report snapshot |  |  SQLite persist | |
-|  |       /:id       |  |  on connect      |  |  Analysis 5m   | |
-|  |  GET  /status    |  |                  |  |  timeout       | |
+|  |  DELETE /analyses |  |  report_snapshot |  |  SQLite persist | |
+|  |       /:id       |  |  on viewer connect|  |  Analysis 5m    | |
+|  |  GET  /status    |  |  Screenshot fwd   |  |  timeout        | |
+|  |                  |  |  throttle 1s      |  |                 | |
 |  +------------------+  +------------------+  +-----------------+ |
 +------------------------------------------------------------------+
 
@@ -56,18 +58,20 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
 |  |  Receives cmds   |  |  Orchestrates    |  |  One Chromium   | |
 |  |  Sends events    |  |  analysis flow   |  |  per analysis   | |
 |  |  Auto-reconnect  |  |  Captures data   |  |  createSession  | |
-|  |                  |  |  Computes risk   |  |  closeSession   | |
-|  |                  |  |  Security scan   |  |  Proxy, UA      | |
-|  |                  |  |  Stop/abort      |  |  Screenshots    | |
-|  |                  |  |  Raw file capture|  |  Clipboard hooks| |
-|  |                  |  |  Page source     |  |                 | |
+|  |  (JSON text)     |  |  Computes risk   |  |  headless/new   | |
+|  |                  |  |  Security scan   |  |  or headed      | |
+|  |                  |  |  Stop/abort      |  |  (real Chrome)   | |
+|  |                  |  |  Raw file capture|  |  puppeteer or   | |
+|  |                  |  |  Page source     |  |  puppeteer-extra|
+|  |                  |  |  Detection drain |  |  Screenshots    | |
+|  |                  |  |  Clipboard poll  |  |  Clipboard hooks| |
 |  +------------------+  +------------------+  +-----------------+ |
 +------------------------------------------------------------------+
 ```
 
 ## Analysis Lifecycle
 
-Each analysis spawns a **new** headless Chromium (no shared browser).
+Each analysis spawns a **new** Chromium (headless or headed / real Chrome). No shared browser.
 
 ```
  User submits URL            Server creates            Agent receives
@@ -76,31 +80,33 @@ Each analysis spawns a **new** headless Chromium (no shared browser).
         v                          v                         v
  +-------------+            +-------------+           +-------------+
  |   PENDING   | ---------> |   RUNNING   | --------> |  New Chromium|
- +-------------+  1st       +-------------+  goto()   |  for this ID |
-                  screenshot       |                   +-------------+
-                                   |                         |
-                          +--------+--------+                |
-                          |                 |                v
-                          v                 v          +-----------+
-                   [User clicks      [Analysis         | Capture   |
-                    "Finish"]         completes         | network   |
-                          |          naturally]         | scripts   |
-                          v                 |          | console   |
-                   +-------------+          |          | raw files |
-                   | Partial     |          |          | clipboard |
-                   | report      |          |          | page src  |
-                   | generated   |          |          | security  |
-                   +------+------+          v          +-----------+
-                          |          +-------------+         |
-                          +--------> |  COMPLETE    |        v
-                                     |  (w/ report) |  +-----------+
-                                     +-------------+  | Compute   |
-                                           |          | risk      |
-                                           v          | score     |
-                                     +-------------+  +-----------+
-                                     |  Report     |        |
-                                     |  displayed  | <------+
-                                     +-------------+
+ +-------------+            +-------------+  goto()   |  for this ID |
+                                   |                   +-------------+
+                          navigation_complete               |
+                                   |                         v
+                          +--------+--------+          +-----------+
+                          |  Initial screenshot        | Capture   |
+                          |  (right after nav)        | network   |
+                          |  Then every 1500ms        | scripts   |
+                          |  + after each interaction | console   |
+                          v                 |          | raw files |
+                   [User clicks      [Analysis         | clipboard  |
+                    "Finish"]         completes         | page src  |
+                          |          naturally]         | detection |
+                          v                 |          | security  |
+                   +-------------+          v          +-----------+
+                   | Partial     |   +-------------+         |
+                   | report      |   |  COMPLETE    |        v
+                   | generated   |   |  (w/ report) |  +-----------+
+                   +------+------+   +-------------+  | Compute   |
+                          |                |          | risk      |
+                          +----------------+          | score     |
+                                     |                +-----------+
+                                     v                      |
+                             +-------------+                |
+                             |  Report     | <--------------+
+                             |  displayed  |
+                             +-------------+
 ```
 
 ## Data Flow: Live Interaction
@@ -109,18 +115,20 @@ Each analysis spawns a **new** headless Chromium (no shared browser).
  Analyst's Browser                 Rust Server                 Puppeteer Agent
  ==================               ============                ================
 
- click on viewport
+ click / scroll / type_text / key_press on viewport
        |
        +--- WS: { type: "click",  ------>  translate to
-              x: 450, y: 230 }            AgentCommand::Click
-                                                  |
-                                                  +--- WS: { type: "click",  ----->  page.mouse.click(x,y)
-                                                         analysis_id, x, y }                |
-                                                                                            v
-                                                                                      take screenshot
-                                                                                            |
+              x, y } (or scroll,   AgentCommand::Click (or Scroll, TypeText, KeyPress)
+              type_text, keypress)         |
+       |                                   +--- WS: command  ----->  page.mouse.click(x,y)
+       |                                                             (or wheel, type, press)
+       |                                                                     |
+       |                                                                     v
+       |                                                             take screenshot (WebP)
+       |                                                                     |
        display screenshot  <------  WS: forward   <------  WS: { type: "screenshot", <-----+
-       in viewport                  to viewer(s)            analysis_id, data, w, h }
+       (Blob URL, WebP)             to viewer(s)            analysis_id, data, w, h }
+                                    (throttle 1s)
 ```
 
 ### Supported Viewer Commands
@@ -156,8 +164,8 @@ Each analysis spawns a **new** headless Chromium (no shared browser).
        |      (status, response_headers, timing, security_details, from_cache,
        |       from_service_worker, response_size, remote_port)
        |
-       +---> raw_file_captured ----------> store in report   ---> add to Raw tab
-                                           (text responses)
+       +---> raw_file_captured ----------> store in report   (not forwarded; large)
+                                           (text responses)  add to Raw tab via report_snapshot
 
  page 'requestfailed' event
        |
@@ -171,36 +179,66 @@ Each analysis spawns a **new** headless Chromium (no shared browser).
  external .js loaded
        |
        +---> script_loaded --------------> update report     ---> add to Scripts tab
+              (content stripped when forwarding to viewer)    (metadata only in live stream)
 
  page.goto() resolves
        |
-       +---> navigation_complete --------> status = running  ---> update URL bar
+       +---> navigation_complete --------> status = running  ---> update URL bar, engine badge
        |                                                          show Finish button
-       +---> page_source_captured -------> store in report   ---> add to Raw tab (pinned)
+       +---> initial screenshot ---------> store + forward   ---> update viewport image
+       |     (right after nav)             (throttle 1s)
+       +---> page_source_captured -------> store in report   (not forwarded to viewer; large)
+       |                                   add to Raw tab (pinned) on report_snapshot
 
  clipboard write intercepted (monkey-patched APIs)
        |
        +---> clipboard_captured ---------> update report     ---> add to Security tab
 
- every 500ms
+ every 1500ms (interval)
        |
        +---> screenshot -----------------> store latest      ---> update viewport image
-                                           sample timeline
+       |     (WebP, quality 20)            sample timeline       (if throttle allows, 1s)
+       |                                   every 3s
+
+ after each interaction (click, scroll, type, keypress)
+       |
+       +---> screenshot -----------------> store + forward   ---> update viewport image
+
+ detection probes (matchMedia, cookie, location, etc.)
+       |
+       +---> detection_event -------------> update report     ---> add to Detection tab
 
  analysis finishes (or user stops)
        |
        +---> analysis_complete ----------> status = complete ---> display full report
               { report: {                  store report           update risk badge
                 risk_score,                merge w/ raw_files     hide Finish button
-                risk_factors,              & page_source
-                network_requests,
+                risk_factors,              & page_source          engine badge
+                network_requests,          & detection_attempts
                 scripts,
                 console_logs,
                 clipboard_reads,
+                detection_attempts,
                 security,
-                redirect_chain
+                redirect_chain,
+                engine
               }}
 ```
+
+### Technical Details (Reference)
+
+| Area | Value / behaviour |
+|------|-------------------|
+| **Screenshots** | **When:** (1) once right after `navigation_complete`, (2) every **1500 ms** on an interval, (3) after each interaction (click, scroll, type_text, key_press). **Format:** WebP, quality 20, `optimizeForSpeed`, `captureBeyondViewport: false`. **Transport:** Agent sends JSON text event `{ type: "screenshot", analysis_id, data (base64), width, height }`. **Server:** Stores latest in `analysis.screenshot`; samples into timeline every **3 s**; forwards to viewers at most every **1000 ms** (throttle). **UI:** Decodes base64 to Blob, displays via `URL.createObjectURL(blob)` (image/webp). |
+| **Viewport** | 1280×800 (config: `browser.viewportWidth`, `browser.viewportHeight`). |
+| **Navigation** | Timeout **30 s** per attempt; strategies: `networkidle2`, `domcontentloaded`, `load`; CDP `Page.navigate` fallback if all fail. |
+| **Analysis timeout** | **5 minutes**; server sends `stop_analysis` if still running. |
+| **Event forwarding** | **Not forwarded to viewers** (to avoid lag): `raw_file_captured`, `page_source_captured`, `dom_snapshot_captured`. **Forwarded lightweight:** `script_loaded` without `content`. Full data remains in server state and in `report_snapshot` on viewer connect. |
+| **Viewer on connect** | Server sends `report_snapshot` (report + status), then latest screenshot, then `screenshot_timeline_available` if any; viewer subscribes to broadcast for live events. |
+| **Browser engine** | `puppeteer` (plain + manual stealth) or `puppeteer-extra` (stealth plugin); config/env `BROWSER_ENGINE`. Shown in UI engine badge. |
+| **Headless / real Chrome** | Default `headless: 'new'`. Set `HEADLESS=false` or `REAL_CHROME=1` for headed (real Chrome); in Docker, entrypoint starts Xvfb and sets `DISPLAY=:99`. |
+| **Detection tab** | Injected monitors record access to `navigator`, `screen`, `matchMedia`, `document.cookie`, `window.location`, etc.; events sent as `detection_event` and shown in Detection tab. |
+| **Network tab** | Requests shown **newest first**; resource type filter (All, Doc, JS, CSS, XHR, Img, Font, Media, Other). |
 
 ## Risk Scoring
 
@@ -228,7 +266,7 @@ The agent computes a risk score from 0 to 100 based on these factors:
 
 ## Per-analysis Browser Isolation
 
-Each analysis runs in its **own** headless Chromium process. There is no shared browser.
+Each analysis runs in its **own** Chromium process (headless or headed / real Chrome). There is no shared browser.
 
 ```
  Analysis A  -->  Chromium instance 1  -->  Target URL A
@@ -392,7 +430,7 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Raw files** — Full response bodies of text-based resources (HTML, JS, CSS, JSON, XML, SVG) stored server-side and persisted across analysis switches. Expandable with syntax highlighting, copy, and download.
 - **Page source** — Rendered HTML of the main document captured after navigation, shown as a pinned entry in the Raw tab.
 - **Clipboard monitoring** — Detects clipboard hijacking (clickfix / paste-theft) by intercepting `navigator.clipboard.writeText`, `navigator.clipboard.write`, `document.execCommand('copy')`, and `copy` DOM events. Shows captured content in the Security tab.
-- **Screenshot timeline** — Sampled screenshots every ~3 seconds stored server-side. Browse them in a gallery with a full-screen viewer after analysis completes. Download individual screenshots.
+- **Screenshot timeline** — Screenshots are taken every 1.5 s (interval) and after each interaction; the server samples one into the timeline every 3 s. Browse them in a gallery with a full-screen viewer after analysis completes. Download individual screenshots.
 - **Last screenshot persistence** — Completed analyses show the final viewport screenshot when revisited.
 
 ### Security Analysis
@@ -415,7 +453,7 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Copy buttons** — URLs and content can be copied to clipboard with one click.
 - **Download buttons** — Download any raw file, script source, page source, or screenshot.
 - **Absolute + relative timestamps** — Shown on all network requests, scripts, console logs, and raw files.
-- **Report tabs** — Network, Scripts, Console, Raw, Screenshots, Security.
+- **Report tabs** — Network, Scripts, Console, Raw, Screenshots, Security, Detection. **Engine badge** — Shows puppeteer or puppeteer-extra for the current analysis.
 - Admin dashboard with overview of all analyses, stats, detail view, and delete (removes from server and database).
 
 ### Infrastructure
@@ -486,6 +524,8 @@ docker run --rm -p 3000:3000 -v carabistouille-data:/data carabistouille
 
 Mount a volume at `/data` to persist the database. The image uses system Chromium and the existing agent config (including `--no-sandbox` for Docker).
 
+**Agent-only in Docker (server on host):** Run the server on your machine and the agent in a container with `cargo run -- --docker-agent`. Add `--real-chrome` to run Chrome in headed mode (non-headless) inside the container using Xvfb for a more realistic browser and better anti-detection.
+
 ## TLS / HTTPS
 
 The server supports TLS natively via `rustls`. Three modes are available:
@@ -540,8 +580,11 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | Flag | Description |
 |------|-------------|
 | `--clean-db` | Delete the SQLite database file before starting (path from `DATABASE_PATH`). Server then starts with an empty analyses list and recreates the DB on first write. |
+| `--docker-agent` | Run the Puppeteer agent inside a Docker container instead of a local process. The server builds the image from `agent/` and starts the container; the agent connects back via `host.docker.internal`. |
+| `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
+| `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
 
-Example: `cargo run -- --clean-db` or `./carabistouille --clean-db`.
+Examples: `cargo run -- --clean-db` or `./carabistouille --docker-agent --real-chrome`.
 
 ### Environment variables
 
@@ -593,7 +636,9 @@ Example: `cargo run -- --clean-db` or `./carabistouille --clean-db`.
 | Component | Technology |
 |-----------|------------|
 | Server | Rust, Axum, Tokio, DashMap, Tower-HTTP, rustls (TLS), rcgen (self-signed certs) |
-| Agent | Node.js, Puppeteer (v24+), ws |
+| Agent | Node.js, Puppeteer (v24+), ws; optional puppeteer-extra + stealth plugin |
 | Frontend | Vanilla JS, WebSocket API, Fetch API, highlight.js (syntax highlighting) |
-| Browser | One headless Chromium per analysis (Puppeteer, `headless: 'shell'` mode) |
+| Browser | One Chromium per analysis (Puppeteer; `headless: 'new'` or headed / real Chrome with Xvfb in Docker) |
 | State | In-memory (DashMap + broadcast channels) + SQLite persistence (analyses) |
+| Screenshots | WebP quality 20, interval 1500 ms, server forward throttle 1000 ms, timeline sample 3 s |
+| Detection | Injected monitors (navigator, screen, matchMedia, cookie, location); Detection tab in UI |

@@ -14,8 +14,11 @@ const config = {
   browser: {
     // 'new' = new headless (Chrome for Testing, realistic fingerprint)
     // 'shell' = old headless (legacy, easily fingerprinted)
-    // false   = headed (visible browser window, useful for debugging)
-    headless: 'new',
+    // false   = headed / "real" Chrome (needs a display; in Docker use Xvfb + HEADLESS=false)
+    // Override: set env HEADLESS=false (or REAL_CHROME=1) for non-headless (e.g. Docker real Chrome).
+    headless: process.env.HEADLESS === 'false' || process.env.REAL_CHROME === '1' || process.env.REAL_CHROME === 'true'
+      ? false
+      : 'new',
 
     // Browser engine to use:
     //   'puppeteer'       — plain Puppeteer + manual stealth patches (faster, easier to debug)
