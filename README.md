@@ -362,6 +362,36 @@ The agent connects to the server via WebSocket at `ws://localhost:3000/ws/agent`
 - Analyst view: [http://localhost:3000](http://localhost:3000)
 - Admin view: [http://localhost:3000/admin.html](http://localhost:3000/admin.html)
 
+## Docker
+
+Run the whole stack (server + agent) in one container with Docker or Docker Compose.
+
+**Using Docker Compose (recommended):**
+
+```bash
+docker compose build
+docker compose up
+```
+
+Then open [http://localhost:3000](http://localhost:3000). The SQLite database is stored in a named volume `carabistouille-data` so analyses persist across restarts.
+
+**Using Docker only:**
+
+```bash
+docker build -t carabistouille .
+docker run --rm -p 3000:3000 -v carabistouille-data:/data carabistouille
+```
+
+**Environment variables** (optional, in `docker-compose.yml` or `docker run -e`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `3000` | Server listen port (must match container port) |
+| `SERVER_URL` | `ws://127.0.0.1:3000/ws/agent` | Agent → server WebSocket (leave default in single-container setup) |
+| `DATABASE_PATH` | `/data/carabistouille.db` | SQLite file path (use `/data/...` to persist with a volume) |
+
+Mount a volume at `/data` to persist the database. The image uses system Chromium and the existing agent config (including `--no-sandbox` for Docker).
+
 ## TLS / HTTPS
 
 The server supports TLS natively via `rustls`. Three modes are available:

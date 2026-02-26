@@ -1,0 +1,27 @@
+# Git
+.git
+.gitignore
+
+# Rust
+target/
+
+# Node
+agent/node_modules
+node_modules
+**/node_modules
+
+# Local DB (don't bake into image)
+*.db
+*.db-journal
+
+# IDE and misc
+.cursor
+*.md
+!README.md
+.env
+.env.*
+*.log
+terminals
+
+# Tests (not needed at runtime)
+tests/

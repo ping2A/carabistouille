@@ -1,0 +1,20 @@
+# Carabistouille: server + agent in one container.
+# Build: docker compose build
+# Run:   docker compose up
+# UI:    http://localhost:3000
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - SERVER_URL=ws://127.0.0.1:3000/ws/agent
+      - DATABASE_PATH=/data/carabistouille.db
+    volumes:
+      - carabistouille-data:/data
+    restart: unless-stopped
+
+volumes:
+  carabistouille-data:
