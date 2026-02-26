@@ -55,7 +55,10 @@ class Agent {
     });
   }
 
-  /** Send a JSON-serialized event to the server. */
+  /**
+   * Send a JSON-serialized event to the server.
+   * @param {Object} event - Event object (e.g. { type, analysis_id, ... }); will be JSON.stringify'd and sent on the WebSocket.
+   */
   send(event) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       const json = JSON.stringify(event);
@@ -69,7 +72,10 @@ class Agent {
     }
   }
 
-  /** Dispatch a command from the server: navigate, click, scroll, stop_analysis, etc. */
+  /**
+   * Dispatch a command from the server: navigate, click, scroll, stop_analysis, etc.
+   * @param {Object} command - Parsed JSON command with type and analysis_id (and type-specific fields).
+   */
   async handleCommand(command) {
     const type = command.type;
     const aid = command.analysis_id;
@@ -141,7 +147,10 @@ class Agent {
     }
   }
 
-  /** Take a screenshot and send it as a JSON text event. */
+  /**
+   * Take a screenshot for the given analysis and send it as a JSON text event to the server.
+   * @param {string} analysisId - Analysis UUID.
+   */
   async sendScreenshot(analysisId) {
     const shot = await this.browserManager.takeScreenshot(analysisId);
     if (shot) {

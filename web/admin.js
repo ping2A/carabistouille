@@ -1,3 +1,6 @@
+/**
+ * Admin dashboard UI: analyses list, stats, detail view, delete, agent status polling.
+ */
 class AdminApp {
   constructor() {
     this.analyses = [];
@@ -14,16 +17,23 @@ class AdminApp {
     setInterval(() => this.refresh(), 5000);
   }
 
+  /**
+   * Translate a key using i18n if available.
+   * @param {string} key - Translation key.
+   * @returns {string}
+   */
   t(key) {
     return window.i18n ? window.i18n.t(key) : key;
   }
 
+  /** Re-render stats, table, and agent status text when language changes. */
   onLangChange() {
     this.renderStats();
     this.renderTable();
     this.updateAgentStatusText();
   }
 
+  /** Update agent status label (connected / disconnected) using current language. */
   updateAgentStatusText() {
     if (!this.agentStatus || !this.statusText) return;
     if (this.agentStatus.classList.contains('connected')) {
@@ -33,6 +43,7 @@ class AdminApp {
     }
   }
 
+  /** Cache DOM references for stats, table, detail panel, agent status. */
   initElements() {
     this.statsEl = document.getElementById('admin-stats');
     this.tbody = document.getElementById('analyses-tbody');
@@ -44,11 +55,13 @@ class AdminApp {
     this.statusText = this.agentStatus.querySelector('.status-text');
   }
 
+  /** Attach click handlers for refresh and detail close. */
   initEventListeners() {
     document.getElementById('refresh-btn').addEventListener('click', () => this.refresh());
     document.getElementById('detail-close').addEventListener('click', () => this.closeDetail());
   }
 
+  /** Fetch analyses from API and re-render stats and table. */
   async refresh() {
     try {
       const res = await fetch('/api/analyses');
@@ -60,6 +73,7 @@ class AdminApp {
     }
   }
 
+  /** Render stat cards: total, active, complete, errors, average risk. */
   renderStats() {
     const total = this.analyses.length;
     const running = this.analyses.filter(a => a.status === 'running' || a.status === 'pending').length;
@@ -93,6 +107,7 @@ class AdminApp {
     `;
   }
 
+  /** Render analyses table rows; show empty state if no analyses. */
   renderTable() {
     if (this.analyses.length === 0) {
       this.emptyEl.style.display = 'flex';
@@ -150,6 +165,10 @@ class AdminApp {
     });
   }
 
+  /**
+   * Load analysis by id from API and show detail panel with rendered report.
+   * @param {string} id - Analysis UUID.
+   */
   async showDetail(id) {
     this.selectedId = id;
     this.renderTable();
@@ -167,6 +186,11 @@ class AdminApp {
     }
   }
 
+  /**
+   * Build HTML for the analysis detail panel (risk, page info, redirects, security, network, scripts, console).
+   * @param {object} a - Analysis object from API (id, url, status, report, etc.).
+   * @returns {string} HTML string.
+   */
   renderDetail(a) {
     let html = `
       <div class="detail-section">
@@ -283,6 +307,10 @@ class AdminApp {
     return html;
   }
 
+  /**
+   * Delete analysis by id (after confirm); refresh list and close detail if that analysis was selected.
+   * @param {string} id - Analysis UUID.
+   */
   async deleteAnalysis(id) {
     if (!confirm(this.t('admin.deleteConfirm'))) return;
     try {
@@ -300,18 +328,25 @@ class AdminApp {
     }
   }
 
+  /** Close the detail panel and clear selected analysis. */
   closeDetail() {
     this.selectedId = null;
     this.detailEl.style.display = 'none';
     this.renderTable();
   }
 
+  /**
+   * Return CSS class for risk score (risk-low, risk-medium, risk-high).
+   * @param {number} score - Risk score 0–100.
+   * @returns {string}
+   */
   riskClass(score) {
     if (score <= 25) return 'risk-low';
     if (score <= 50) return 'risk-medium';
     return 'risk-high';
   }
 
+  /** Poll /api/status and update agent status badge; run once then every 3s. */
   async pollAgentStatus() {
     const check = async () => {
       try {
@@ -336,6 +371,11 @@ class AdminApp {
     setInterval(check, 3000);
   }
 
+  /**
+   * Escape string for safe HTML insertion.
+   * @param {string} str - Raw string.
+   * @returns {string} HTML-escaped string.
+   */
   esc(str) {
     const el = document.createElement('span');
     el.textContent = str || '';

@@ -53,10 +53,16 @@ class App {
     console.log('[ui] App initialized');
   }
 
+  /**
+   * Translate a key using i18n if available.
+   * @param {string} key - Translation key.
+   * @returns {string}
+   */
   t(key) {
     return window.i18n ? window.i18n.t(key) : key;
   }
 
+  /** Re-render all report panels and agent status when language changes. */
   onLangChange() {
     this.updateAgentStatusText();
     this.renderNetworkPanel();
@@ -68,6 +74,7 @@ class App {
     this.renderDetectionPanel();
   }
 
+  /** Update agent status label (connected / disconnected) using current language. */
   updateAgentStatusText() {
     if (!this.agentStatus || !this.statusText) return;
     if (this.agentStatus.classList.contains('connected')) {
@@ -188,6 +195,7 @@ class App {
     this._initReportResizer();
   }
 
+  /** Initialize drag resizer for the report panel (left edge). */
   _initReportResizer() {
     const resizer = document.getElementById('report-resizer');
     const panel = document.getElementById('report-panel');
@@ -220,6 +228,11 @@ class App {
   }
 
   /** Map mouse event to viewport image coordinates (accounting for scale). */
+  /**
+   * Get viewport-relative (x, y) from mouse/pointer event, accounting for image offset and scale.
+   * @param {MouseEvent|WheelEvent} e - Event.
+   * @returns {{ x: number, y: number } | null}
+   */
   getViewportCoords(e) {
     const rect = this.viewportImg.getBoundingClientRect();
     const scaleX = this.viewportImg.naturalWidth / rect.width;
@@ -231,6 +244,7 @@ class App {
   }
 
   /** Send click or inspect command to agent depending on active tool. */
+  /** Handle click on viewport: interact (send click) or inspect (request element at coords). */
   handleViewportClick(e) {
     if (!this.ws) return;
     const { x, y } = this.getViewportCoords(e);
@@ -244,6 +258,7 @@ class App {
   }
 
   /** Send scroll (delta_x, delta_y) to agent. */
+  /** Send scroll delta to agent for current analysis. */
   handleViewportScroll(e) {
     if (!this.ws) return;
     e.preventDefault();
@@ -251,6 +266,7 @@ class App {
   }
 
   /** Throttled mousemove: send coordinates to agent for hover effects. */
+  /** Throttled mousemove: send coordinates to agent for hover/cursor. */
   handleViewportMouseMove(e) {
     if (!this.ws || this.activeTool !== 'interact') return;
 
@@ -263,6 +279,7 @@ class App {
   }
 
   /** POST /api/analyses with url (and optional proxy), then select the new analysis and connect viewer WS. */
+  /** Submit URL form: POST /api/analyze, then connect viewer and load report if already complete. */
   async submitUrl() {
     const url = this.urlInput.value.trim();
     if (!url) return;
@@ -306,6 +323,7 @@ class App {
   }
 
   /** POST /api/analyses/:id/stop to request analysis finish. */
+  /** POST /api/stop for current analysis and disconnect viewer. */
   async stopAnalysis() {
     if (!this.currentAnalysisId) return;
 
@@ -323,6 +341,7 @@ class App {
   }
 
   /** Fetch GET /api/analyses and render the sidebar list; update selected item. */
+  /** Fetch /api/analyses and render analyses list. */
   async loadAnalyses() {
     try {
       const res = await fetch('/api/analyses');
@@ -333,6 +352,10 @@ class App {
     }
   }
 
+  /**
+   * Render the analyses list in the sidebar (URL, status, select).
+   * @param {Array<{ id: string, url: string, status: string }>} analyses - List from API.
+   */
   renderAnalysesList(analyses) {
     this.analysesList.innerHTML = analyses
       .map((a) => {
@@ -375,6 +398,7 @@ class App {
   }
 
   /** Show/hide Finish button based on status (pending | running vs complete | error). */
+  /** Show/hide and enable/disable stop button based on analysis status (running vs not). */
   updateStopButton(status) {
     this.currentStatus = status;
     const active = status === 'pending' || status === 'running';
@@ -383,6 +407,7 @@ class App {
   }
 
   /** Clear in-memory report data and re-render all panels; hide viewport image and stop button. */
+  /** Clear all report data (network, scripts, console, raw, screenshots, security, risk) and re-render panels. */
   resetReportPanels() {
     this.networkRequests = [];
     this.scripts = [];
@@ -499,7 +524,10 @@ class App {
     }
   }
 
-  /** Open WebSocket to /ws/viewer/:id; on message dispatch to handleViewerEvent. */
+  /**
+   * Open WebSocket to /ws/viewer/:id; on message dispatch to handleViewerEvent; reconnect on close if still selected.
+   * @param {string} analysisId - Analysis UUID.
+   */
   connectViewer(analysisId) {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/viewer/${analysisId}`;
@@ -540,7 +568,10 @@ class App {
     };
   }
 
-  /** Dispatch incoming viewer events: screenshot, network_request_captured, report_snapshot, analysis_complete, etc. */
+  /**
+   * Dispatch incoming viewer WebSocket events: screenshot, network_request_captured, report_snapshot, analysis_complete, element_info, error, etc.
+   * @param {object} event - Parsed WS message (type, and type-specific fields).
+   */
   handleViewerEvent(event) {
     switch (event.type) {
       case 'screenshot':
@@ -745,7 +776,10 @@ class App {
     }
   }
 
-  /** Display inspected element: highlight rect and show tag/attributes in inspector panel. */
+  /**
+   * Display inspected element: highlight rect on viewport and show tag/attributes in inspector panel.
+   * @param {object} info - Element info from agent (tag, rect, attributes, text).
+   */
   showElementInfo(info) {
     const imgRect = this.viewportImg.getBoundingClientRect();
     const scaleX = imgRect.width / this.viewportImg.naturalWidth;
@@ -786,6 +820,7 @@ class App {
     else this.riskBadge.classList.add('high');
   }
 
+  /** Show engine label (e.g. Puppeteer, Puppeteer Extra + Stealth) in report header from current analysis. */
   updateEngineBadge() {
     if (!this.agentEngineEl) return;
     if (!this.engine) {
@@ -968,6 +1003,7 @@ class App {
     });
   }
 
+  /** Format headers object as HTML table rows (name/value). */
   _formatHeaders(headers) {
     if (!headers || typeof headers !== 'object') return null;
     return Object.entries(headers)
@@ -975,10 +1011,12 @@ class App {
       .join('\n');
   }
 
+  /** Format a key-value row for request detail HTML. */
   _kv(key, val) {
     return `<div class="net-detail-kv"><span class="net-detail-key">${this.esc(key)}</span><span class="net-detail-val">${val}</span></div>`;
   }
 
+  /** Build expandable request detail HTML: headers, payload, timing, security, initiator, response. */
   _buildRequestDetail(r) {
     const s = [];
     const reqHeaders = this._formatHeaders(r.request_headers);
@@ -1091,6 +1129,7 @@ class App {
     return s.join('');
   }
 
+  /** Format byte count as human-readable string (e.g. 1.2 KB). */
   _formatSize(bytes) {
     if (bytes == null) return '—';
     if (bytes < 1024) return bytes + ' B';
@@ -1098,6 +1137,7 @@ class App {
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   }
 
+  /** Format TLS cert date (seconds since epoch) as locale string. */
   _formatCertDate(epoch) {
     if (epoch == null) return '—';
     try {
@@ -1106,6 +1146,7 @@ class App {
     } catch { return String(epoch); }
   }
 
+  /** Build HTML for request timing waterfall (DNS, connect, SSL, send, receive). */
   _buildTimingWaterfall(timing) {
     if (!timing) return '';
     const phases = [];
@@ -1578,6 +1619,7 @@ class App {
     });
   }
 
+  /** Open screenshot modal at given index; wire prev/next and keyboard. */
   _showScreenshotModal(idx) {
     const ss = this.screenshotTimeline[idx];
     if (!ss) return;
@@ -1646,6 +1688,7 @@ class App {
     modal.style.display = 'flex';
   }
 
+  /** Update screenshot modal content to index i (image, counter, download). */
   _updateSSModal(i) {
     const modal = document.getElementById('ss-modal');
     if (!modal) return;
@@ -1663,6 +1706,12 @@ class App {
     modal.dataset.currentIdx = i;
   }
 
+  /**
+   * Decode base64 string to Blob for the given MIME type.
+   * @param {string} b64 - Base64-encoded string.
+   * @param {string} type - MIME type (e.g. 'image/webp').
+   * @returns {Blob}
+   */
   _b64toBlob(b64, type) {
     const bin = atob(b64);
     const arr = new Uint8Array(bin.length);
@@ -1842,6 +1891,7 @@ class App {
     });
   }
 
+  /** Render Detection tab: list of headless/fingerprint detection attempts with category and severity. */
   renderDetectionPanel() {
     const list = document.getElementById('panel-detection-list');
     const countEl = document.getElementById('count-detection');
@@ -2008,14 +2058,17 @@ class App {
     return 'javascript';
   }
 
-  /** Send a JSON object over the viewer WebSocket. */
+  /**
+   * Send a JSON object over the viewer WebSocket (no-op if not open).
+   * @param {object} data - Object to JSON.stringify and send.
+   */
   wsSend(data) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(data));
     }
   }
 
-  /** Periodically fetch GET /api/status and update agent status indicator. */
+  /** Fetch GET /api/status once then every 3s; update agent badge, submit button, and header info. */
   async pollAgentStatus() {
     const check = async () => {
       try {
@@ -2049,6 +2102,11 @@ class App {
     setInterval(check, 3000);
   }
 
+  /**
+   * Format timestamp as seconds since analysis start (e.g. +2.5s).
+   * @param {number} timestamp - Unix ms.
+   * @returns {string}
+   */
   _relTime(timestamp) {
     if (!timestamp || !this.analysisStartTime) return '';
     const delta = (timestamp - this.analysisStartTime) / 1000;
@@ -2072,7 +2130,11 @@ class App {
     return rel ? `${abs} (${rel})` : abs;
   }
 
-  /** Escape HTML for safe insertion into innerHTML. */
+  /**
+   * Escape HTML for safe insertion into innerHTML.
+   * @param {string} str - Raw string.
+   * @returns {string} HTML-escaped string.
+   */
   esc(str) {
     const el = document.createElement('span');
     el.textContent = str || '';

@@ -33,7 +33,13 @@ export class BrowserManager {
     this.viewportHeight = config.browser.viewportHeight;
   }
 
-  /** Start a new Chromium for this analysis (closing any existing one). Optional proxy and userAgent. Returns the page. */
+  /**
+   * Start a new Chromium for this analysis (closing any existing one). Applies stealth/detection scripts and optional proxy/UA.
+   * @param {string} analysisId - Analysis UUID.
+   * @param {string|null} [proxy=null] - Optional proxy URL (e.g. socks5://host:port).
+   * @param {string|null} [userAgent=null] - Optional User-Agent string.
+   * @returns {Promise<import('puppeteer').Page>} The new page.
+   */
   async createSession(analysisId, proxy = null, userAgent = null) {
     await this.closeSession(analysisId);
 
@@ -88,17 +94,29 @@ export class BrowserManager {
     return page;
   }
 
-  /** Get session { browser, page, proxy } or undefined. */
+  /**
+   * Get the session for an analysis.
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {{ browser: import('puppeteer').Browser, page: import('puppeteer').Page, proxy: string|null } | undefined}
+   */
   getSession(analysisId) {
     return this.sessions.get(analysisId);
   }
 
-  /** True if a session exists for this analysis. */
+  /**
+   * Check if a session exists for this analysis.
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {boolean}
+   */
   hasSession(analysisId) {
     return this.sessions.has(analysisId);
   }
 
-  /** Get the page for this analysis; if the page was closed, create a new one in the same browser. */
+  /**
+   * Get the page for this analysis; if the page was closed, create a new one in the same browser.
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {Promise<import('puppeteer').Page>}
+   */
   async getPage(analysisId) {
     const session = this.sessions.get(analysisId);
     if (!session) throw new Error(`No browser session for analysis ${analysisId}`);
@@ -109,7 +127,11 @@ export class BrowserManager {
     return session.page;
   }
 
-  /** Capture viewport as base64-encoded WebP. Returns { data, width, height } or null on error. */
+  /**
+   * Capture the viewport as base64-encoded WebP (quality 20, optimizeForSpeed).
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {Promise<{ data: string, width: number, height: number } | null>}
+   */
   async takeScreenshot(analysisId) {
     try {
       const page = await this.getPage(analysisId);
@@ -130,31 +152,54 @@ export class BrowserManager {
     }
   }
 
-  /** Mouse click at (x, y) in viewport coordinates. */
+  /**
+   * Mouse click at (x, y) in viewport coordinates.
+   * @param {string} analysisId - Analysis UUID.
+   * @param {number} x - Viewport X.
+   * @param {number} y - Viewport Y.
+   */
   async click(analysisId, x, y) {
     const page = await this.getPage(analysisId);
     await page.mouse.click(x, y);
   }
 
-  /** Mouse wheel scroll by (deltaX, deltaY). */
+  /**
+   * Mouse wheel scroll by (deltaX, deltaY).
+   * @param {string} analysisId - Analysis UUID.
+   * @param {number} deltaX - Horizontal scroll delta.
+   * @param {number} deltaY - Vertical scroll delta.
+   */
   async scroll(analysisId, deltaX, deltaY) {
     const page = await this.getPage(analysisId);
     await page.mouse.wheel({ deltaX, deltaY });
   }
 
-  /** Move mouse to (x, y). */
+  /**
+   * Move mouse to (x, y) in viewport coordinates.
+   * @param {string} analysisId - Analysis UUID.
+   * @param {number} x - Viewport X.
+   * @param {number} y - Viewport Y.
+   */
   async moveMouse(analysisId, x, y) {
     const page = await this.getPage(analysisId);
     await page.mouse.move(x, y);
   }
 
-  /** Type a string (keyboard.type). */
+  /**
+   * Type a string using the keyboard (keyboard.type).
+   * @param {string} analysisId - Analysis UUID.
+   * @param {string} text - Text to type.
+   */
   async typeText(analysisId, text) {
     const page = await this.getPage(analysisId);
     await page.keyboard.type(text);
   }
 
-  /** Press a single key (e.g. Enter, Backspace). */
+  /**
+   * Press a single key (e.g. Enter, Backspace).
+   * @param {string} analysisId - Analysis UUID.
+   * @param {string} key - Key name (Puppeteer keyboard key).
+   */
   async keyPress(analysisId, key) {
     const page = await this.getPage(analysisId);
     await page.keyboard.press(key);
@@ -163,6 +208,7 @@ export class BrowserManager {
   /**
    * Inject stealth patches before any page script runs to evade headless Chrome detection.
    * Covers: navigator.webdriver, plugins, languages, chrome runtime, Permissions, WebGL, screen, vendor, document artifacts.
+   * @param {import('puppeteer').Page} page - Puppeteer page to patch.
    */
   async installStealthPatches(page) {
     const viewportWidth = this.viewportWidth;
@@ -315,6 +361,7 @@ export class BrowserManager {
    * Lightweight patches applied when puppeteer-extra stealth plugin is active.
    * Only covers gaps the plugin doesn't handle: automation artifact cleanup, realistic
    * screen dimensions, iframe cross-frame chrome stub, and force-dark-mode preference.
+   * @param {import('puppeteer').Page} page - Puppeteer page to patch.
    */
   async installSupplementalPatches(page) {
     const viewportWidth = this.viewportWidth;
@@ -364,6 +411,7 @@ export class BrowserManager {
    * Install monitors that record when page scripts probe properties commonly used for headless detection.
    * The monitors wrap the already-patched stealth values, so they return the spoofed value while
    * logging the access (property, category, stack trace) to window.__detectionAttempts.
+   * @param {import('puppeteer').Page} page - Puppeteer page to attach monitors to.
    */
   async installDetectionMonitors(page) {
     await page.evaluateOnNewDocument(() => {
@@ -707,6 +755,10 @@ export class BrowserManager {
    * Intercepts: navigator.clipboard.writeText/write, document.execCommand('copy'), and 'copy' event.
    * Captured writes are pushed to window.__clipboardCaptures for later drain.
    */
+  /**
+   * Install clipboard interception (writeText, write, execCommand, copy event) and store captures for the analysis.
+   * @param {string} analysisId - Analysis UUID.
+   */
   async installClipboardHooks(analysisId) {
     try {
       const page = await this.getPage(analysisId);
@@ -789,6 +841,11 @@ export class BrowserManager {
    * Drain all clipboard captures collected by the injected hooks.
    * Returns an array of { content, method, timestamp } and clears the buffer.
    */
+  /**
+   * Retrieve and clear clipboard captures for this analysis (used after navigation, on poll, or at stop).
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {Promise<Array<{ content: string, timestamp?: number, method?: string }>>}
+   */
   async drainClipboardCaptures(analysisId) {
     try {
       const page = await this.getPage(analysisId);
@@ -804,6 +861,11 @@ export class BrowserManager {
     }
   }
 
+  /**
+   * Retrieve and clear detection attempts (headless probes) recorded by installDetectionMonitors for this analysis.
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {Promise<Array<{ property: string, category: string, severity: string, description?: string, caller?: string, timestamp: number }>>}
+   */
   async drainDetectionAttempts(analysisId) {
     try {
       const page = await this.getPage(analysisId);
@@ -819,7 +881,13 @@ export class BrowserManager {
     }
   }
 
-  /** Element at viewport (x, y): tag, id, classes, attributes, text snippet, rect, computed styles. */
+  /**
+   * Get element at viewport (x, y): tag, id, classes, attributes, text snippet, rect, computed styles.
+   * @param {string} analysisId - Analysis UUID.
+   * @param {number} x - Viewport X.
+   * @param {number} y - Viewport Y.
+   * @returns {Promise<{ tag: string, id?: string, classes: string[], attributes: Object, text: string, rect: { x, y, width, height } } | null>}
+   */
   async inspectElement(analysisId, x, y) {
     try {
       const page = await this.getPage(analysisId);
@@ -862,7 +930,10 @@ export class BrowserManager {
     }
   }
 
-  /** Close the browser for this analysis and remove the session. */
+  /**
+   * Close the browser for this analysis and remove the session from the map.
+   * @param {string} analysisId - Analysis UUID.
+   */
   async closeSession(analysisId) {
     const session = this.sessions.get(analysisId);
     if (!session) return;
@@ -875,7 +946,9 @@ export class BrowserManager {
     console.log(`[browser] Session closed for ${analysisId} (remaining: ${this.sessions.size})`);
   }
 
-  /** Close all browser sessions (e.g. on shutdown). */
+  /**
+   * Close all browser sessions and clear the session map (e.g. on process shutdown).
+   */
   async closeAll() {
     const ids = [...this.sessions.keys()];
     for (const id of ids) {

@@ -122,6 +122,10 @@
     'lang.zh': { en: 'Chinese', fr: 'Chinois', zh: '中文' },
   };
 
+  /**
+   * Get current language from localStorage ('en' | 'fr' | 'zh').
+   * @returns { 'en' | 'fr' | 'zh' }
+   */
   function getLang() {
     try {
       const l = localStorage.getItem(STORAGE_LANG);
@@ -130,6 +134,10 @@
     return 'en';
   }
 
+  /**
+   * Get current theme from localStorage ('dark' | 'light').
+   * @returns { 'dark' | 'light' }
+   */
   function getTheme() {
     try {
       const t = localStorage.getItem(STORAGE_THEME);
@@ -138,6 +146,11 @@
     return 'dark';
   }
 
+  /**
+   * Translate a key to the current language.
+   * @param {string} key - Translation key (e.g. 'app.title', 'admin.refresh').
+   * @returns {string} Translated string or key if not found.
+   */
   function t(key) {
     const lang = getLang();
     const map = translations[key];
@@ -145,6 +158,10 @@
     return map[lang] || map.en || key;
   }
 
+  /**
+   * Set language and persist to localStorage; reapplies UI translations.
+   * @param { 'en' | 'fr' | 'zh' } lang - Language code.
+   */
   function setLang(lang) {
     if (lang !== 'en' && lang !== 'fr' && lang !== 'zh') return;
     try {
@@ -153,6 +170,10 @@
     applyLang();
   }
 
+  /**
+   * Set theme and persist to localStorage; reapplies body theme class and toggle icon.
+   * @param { 'dark' | 'light' } theme - Theme name.
+   */
   function setTheme(theme) {
     if (theme !== 'dark' && theme !== 'light') return;
     try {
@@ -161,6 +182,9 @@
     applyTheme();
   }
 
+  /**
+   * Apply current theme: set body class (theme-dark / theme-light) and update theme toggle icon/title.
+   */
   function applyTheme() {
     const theme = getTheme();
     document.body.classList.remove('theme-dark', 'theme-light');
@@ -214,6 +238,7 @@
     }
   });
 
+  /** Public i18n API: translation, theme/language getters/setters, and apply functions. */
   window.i18n = {
     t: t,
     getLang: getLang,

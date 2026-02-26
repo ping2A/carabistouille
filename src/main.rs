@@ -17,6 +17,7 @@ struct CliArgs {
     real_chrome: bool,
 }
 
+/// Parse command-line arguments: --clean-db, --docker-agent, --real-chrome, --browser-engine.
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let clean_db = args.iter().any(|a| a == "--clean-db");

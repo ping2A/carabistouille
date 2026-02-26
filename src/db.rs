@@ -16,7 +16,7 @@ pub enum DbOp {
     Delete(String),
 }
 
-/// Create the analyses table if it does not exist.
+/// Create the `analyses` table if it does not exist (id, url, status, timestamps, report_json, screenshot, timeline).
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute(
         r#"
@@ -36,6 +36,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Serialize analysis status for storage (pending | running | complete | error).
 fn status_to_str(s: &AnalysisStatus) -> &'static str {
     match s {
         AnalysisStatus::Pending => "pending",
@@ -45,6 +46,7 @@ fn status_to_str(s: &AnalysisStatus) -> &'static str {
     }
 }
 
+/// Parse stored status string into `AnalysisStatus`; defaults to Pending on unknown.
 fn str_to_status(s: &str) -> AnalysisStatus {
     match s {
         "pending" => AnalysisStatus::Pending,
@@ -109,6 +111,7 @@ pub fn load_analyses(path: &Path) -> rusqlite::Result<Vec<Analysis>> {
     Ok(out)
 }
 
+/// Apply a single DB operation: insert/update analysis or delete by id.
 fn apply_op(conn: &Connection, op: DbOp) -> rusqlite::Result<()> {
     match op {
         DbOp::Insert(a) | DbOp::Update(a) => {

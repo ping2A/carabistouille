@@ -4,15 +4,27 @@
  */
 import config from '../config.js';
 
-/** Holds per-analysis state (requests, scripts, console, redirects, clipboard), runs capture and report. */
+/**
+ * Holds per-analysis state (requests, scripts, console, redirects, clipboard), runs capture and report.
+ * Orchestrates navigation, network/console listeners, screenshots, and final risk computation.
+ */
 export class Analyzer {
+  /**
+   * @param {import('./browser.js').BrowserManager} browserManager - Browser/session manager for creating pages and taking screenshots.
+   */
   constructor(browserManager) {
     this.browserManager = browserManager;
     this.activeAnalyses = new Map();
     this.screenshotIntervals = new Map();
   }
 
-  /** Set up request/response/console listeners, navigate to url, capture inline scripts and page source; keep analysis live until stop. */
+  /**
+   * Set up request/response/console listeners, navigate to url, capture inline scripts and page source; keep analysis live until stop.
+   * @param {string} analysisId - Analysis UUID.
+   * @param {string} url - URL to navigate to.
+   * @param {(event: object) => void} sendEvent - Callback to send events (e.g. to WebSocket).
+   * @returns {Promise<void>}
+   */
   async startAnalysis(analysisId, url, sendEvent) {
     console.log(`[analyzer] Starting analysis ${analysisId} for ${url}`);
 
@@ -350,7 +362,13 @@ export class Analyzer {
     }
   }
 
-  /** Try each waitUntil strategy in order; if all fail, use CDP Page.navigate as fallback. */
+  /**
+   * Try each waitUntil strategy in order; if all fail, use CDP Page.navigate as fallback.
+   * @param {import('puppeteer').Page} page - Puppeteer page.
+   * @param {string} url - URL to load.
+   * @param {object} state - Analysis state (checked for aborted).
+   * @returns {Promise<void>}
+   */
   async _navigateWithRetries(page, url, state) {
     const timeout = config.navigation.timeout;
     const chain = config.navigation.waitUntilChain;
@@ -386,7 +404,12 @@ export class Analyzer {
     }
   }
 
-  /** Check HTTPS, mixed content, suspicious patterns (eval+unescape, iframes, hidden forms, etc.). */
+  /**
+   * Check HTTPS, mixed content, suspicious patterns (eval+unescape, iframes, hidden forms, etc.).
+   * @param {import('puppeteer').Page} page - Puppeteer page (final URL used for HTTPS check).
+   * @param {string} originalUrl - Original navigation URL (for reference).
+   * @returns {Promise<{ ssl_valid: boolean|null, ssl_issuer: string|null, ssl_protocol: string|null, has_mixed_content: boolean, suspicious_patterns: string[] }>}
+   */
   async analyzeSecurityIndicators(page, originalUrl) {
     const security = {
       ssl_valid: null,
@@ -439,7 +462,15 @@ export class Analyzer {
     return security;
   }
 
-  /** Compute risk score 0–100 and list of risk factors from redirects, third-party, HTTPS, mixed content, patterns, clipboard. */
+  /**
+   * Compute risk score 0–100 and list of risk factors from redirects, third-party, HTTPS, mixed content, patterns, clipboard.
+   * @param {Array} networkRequests - Captured network requests.
+   * @param {Array} scripts - Captured scripts (inline and external).
+   * @param {Array} redirectChain - Redirect chain from navigation.
+   * @param {object} security - Result of analyzeSecurityIndicators.
+   * @param {Array} [clipboardReads=[]] - Intercepted clipboard writes.
+   * @returns {{ riskScore: number, riskFactors: string[] }}
+   */
   computeRisk(networkRequests, scripts, redirectChain, security, clipboardReads = []) {
     let riskScore = 0;
     const riskFactors = [];
@@ -485,7 +516,10 @@ export class Analyzer {
     return { riskScore: Math.min(riskScore, 100), riskFactors };
   }
 
-  /** Remove request/response/console listeners and screenshot interval for this analysis. */
+  /**
+   * Remove request/response/console listeners and screenshot interval for this analysis; mark state aborted.
+   * @param {string} analysisId - Analysis UUID.
+   */
   cleanupAnalysis(analysisId) {
     const state = this.activeAnalyses.get(analysisId);
     if (state) {
@@ -511,7 +545,11 @@ export class Analyzer {
     }
   }
 
-  /** Drain clipboard, cleanup, collect final URL/title/inline scripts/security, compute risk, send analysis_complete. */
+  /**
+   * Drain clipboard and detection attempts, cleanup, collect final URL/title/storage/security/DOM, compute risk, send analysis_complete.
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {Promise<void>}
+   */
   async stopAnalysis(analysisId) {
     console.log(`[analyzer] Stopping analysis ${analysisId}`);
     const state = this.activeAnalyses.get(analysisId);
@@ -659,7 +697,12 @@ export class Analyzer {
     });
   }
 
-  /** Drain clipboard captures from the page, push to state.clipboardReads, send clipboard_captured events. */
+  /**
+   * Drain clipboard captures from the page, push to state.clipboardReads, send clipboard_captured events.
+   * @param {string} analysisId - Analysis UUID.
+   * @param {string} [trigger='poll'] - Trigger label (e.g. 'poll', 'navigation', 'click').
+   * @returns {Promise<void>}
+   */
   async _drainAndReportClipboard(analysisId, trigger = 'poll') {
     const state = this.activeAnalyses.get(analysisId);
     if (!state?.sendEvent) return;
@@ -681,11 +724,21 @@ export class Analyzer {
     }
   }
 
-  /** Convenience: drain and report clipboard for a given trigger (e.g. 'click', 'keypress'). */
+  /**
+   * Convenience: drain and report clipboard for a given trigger (e.g. 'click', 'keypress').
+   * @param {string} analysisId - Analysis UUID.
+   * @param {string} [trigger='click'] - Trigger label for the report.
+   * @returns {Promise<void>}
+   */
   async reportClipboard(analysisId, trigger = 'click') {
     await this._drainAndReportClipboard(analysisId, trigger);
   }
 
+  /**
+   * Drain detection attempts from the page, push to state.detectionAttempts, send detection_event events.
+   * @param {string} analysisId - Analysis UUID.
+   * @returns {Promise<void>}
+   */
   async _drainAndReportDetection(analysisId) {
     const state = this.activeAnalyses.get(analysisId);
     if (!state?.sendEvent) return;

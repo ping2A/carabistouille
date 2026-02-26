@@ -4,7 +4,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// A single screenshot in the timeline (base64 JPEG data + timestamp).
+/// A single screenshot in the timeline (base64 image data, e.g. WebP, plus timestamp).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenshotEntry {
     pub data: String,
