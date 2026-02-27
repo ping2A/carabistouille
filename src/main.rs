@@ -214,12 +214,17 @@ async fn main() {
     if let Some(tls_config) = resolve_tls_config().await {
         tracing::info!("Server listening on https://{}", addr);
         axum_server::bind_rustls(addr, tls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
             .await
             .unwrap();
     } else {
         tracing::info!("Server listening on http://{} (no TLS)", addr);
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     }
 }

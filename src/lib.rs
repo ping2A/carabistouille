@@ -7,11 +7,19 @@ pub mod models;
 mod protocol;
 mod state;
 
+use std::time::Duration;
+
 use axum::{
+    extract::ConnectInfo,
     routing::{delete, get, post},
     Router,
 };
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{
+    cors::CorsLayer,
+    services::ServeDir,
+    trace::TraceLayer,
+};
+use tracing::Span;
 
 pub use state::AppState;
 
@@ -32,5 +40,41 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler))
         .fallback_service(ServeDir::new("web"))
         .layer(CorsLayer::permissive())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|req: &axum::http::Request<_>| {
+                    let client_ip = req
+                        .extensions()
+                        .get::<ConnectInfo<std::net::SocketAddr>>()
+                        .map(|ci| ci.0.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    tracing::info_span!(
+                        "request",
+                        method = %req.method(),
+                        uri = %req.uri(),
+                        client = %client_ip,
+                    )
+                })
+                .on_response(
+                    |res: &axum::http::Response<_>, latency: Duration, _span: &Span| {
+                        tracing::info!(
+                            status = res.status().as_u16(),
+                            latency_ms = latency.as_millis(),
+                            "response"
+                        );
+                    },
+                )
+                .on_failure(
+                    |err: tower_http::classify::ServerErrorsFailureClass,
+                     latency: Duration,
+                     _span: &Span| {
+                        tracing::error!(
+                            error = %err,
+                            latency_ms = latency.as_millis(),
+                            "request failed"
+                        );
+                    },
+                ),
+        )
         .with_state(state)
 }
