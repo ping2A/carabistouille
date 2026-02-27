@@ -3,6 +3,8 @@
 # Harmless when headless: Chrome simply doesn't use the display.
 # Optionally bring up WireGuard so all traffic (including Chromium) goes through the VPN.
 set -e
+# Remove stale lock from a previous run (e.g. container restart) so Xvfb can start.
+rm -f /tmp/.X99-lock
 Xvfb :99 -screen 0 1280x800x24 -ac &
 export DISPLAY=:99
 

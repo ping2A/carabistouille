@@ -1,7 +1,9 @@
 #!/bin/sh
 set -e
 
-# Start virtual display so the agent can run real (headed) Chrome when HEADLESS=false
+# Start virtual display so the agent can run real (headed) Chrome when HEADLESS=false.
+# Remove stale lock from a previous run (e.g. container restart) so Xvfb can start.
+rm -f /tmp/.X99-lock
 Xvfb :99 -screen 0 1280x800x24 -ac &
 export DISPLAY=:99
 
@@ -73,10 +75,11 @@ sleep 2
 cd /app/agent && exec node src/index.js &
 AGENT_PID=$!
 
-# Wait for either process to exit (e.g. SIGTERM from docker stop)
-wait -n 2>/dev/null || true
+# Wait only for the server; container stays up until the server exits (e.g. SIGTERM from docker stop).
+# If the agent exits first (e.g. crash), we keep running so Docker does not restart in a loop.
+wait $SERVER_PID 2>/dev/null || true
 EXIT_CODE=$?
 
-# Clean up: kill both so the container exits
-kill $SERVER_PID $AGENT_PID 2>/dev/null || true
+# Clean up: kill agent if still running so the container exits cleanly
+kill $AGENT_PID 2>/dev/null || true
 exit ${EXIT_CODE:-0}
