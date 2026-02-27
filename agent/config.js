@@ -36,7 +36,7 @@ const config = {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-web-security',
-      '--disable-features=SafeBrowsing,IsolateOrigins,site-per-process,AdTagging,SubresourceFilter,HeavyAdIntervention,HttpsFirstBalancedModeAutoEnable',
+      '--disable-features=SafeBrowsing,IsolateOrigins,site-per-process,AdTagging,SubresourceFilter,HeavyAdIntervention,HttpsFirstBalancedModeAutoEnable,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults',
       '--disable-client-side-phishing-detection',
       '--disable-component-extensions-with-background-pages',
       '--disable-default-apps',

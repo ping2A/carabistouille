@@ -27,36 +27,21 @@ if [ -n "$WIREGUARD_CONFIG_PATH" ] && [ -f "$WIREGUARD_CONFIG_PATH" ]; then
     MTU=$(grep -E '^MTU\s*=' "$WIREGUARD_CONFIG_PATH" | sed 's/^MTU\s*=\s*//; s/\s.*//; q')
     [ -n "$MTU" ] && ip link set dev "$IFACE" mtu "$MTU" 2>/dev/null || true
     ip link set up dev "$IFACE"
-    # Replace default route so internet traffic goes through the VPN, but keep route to Docker/host
-    ETH_DEV=$(ip route show default 2>/dev/null | awk '{print $5}')
-    DEFGW=$(ip route show default 2>/dev/null | awk '{print $3}')
-    [ -n "$ETH_DEV" ] && SAVED_ROUTES=$(ip route show dev "$ETH_DEV" 2>/dev/null | grep -v '^default' | awk '{print $1}' | tr '\n' ' ')
-    ip route del default 2>/dev/null || true
-    ip route add default dev "$IFACE"
-    ip -6 route del default 2>/dev/null || true
-    ip -6 route add default dev "$IFACE" 2>/dev/null || true
-    # Re-add routes so the agent can reach the server (host.docker.internal).
-    # Gateway and connected networks via eth0; other private ranges via gateway so host is reachable.
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add "$DEFGW"/32 dev "$ETH_DEV" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && for net in $SAVED_ROUTES; do
-      [ -n "$net" ] && ip route add "$net" dev "$ETH_DEV" 2>/dev/null || true
-    done
-    # Docker Desktop: host.docker.internal often in 192.168.x.x; route via gateway so host is reachable
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add 192.168.0.0/16 via "$DEFGW" dev "$ETH_DEV" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add 172.16.0.0/12 via "$DEFGW" dev "$ETH_DEV" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add 10.0.0.0/8 via "$DEFGW" dev "$ETH_DEV" 2>/dev/null || true
-    # Set DNS from WireGuard config so resolution works through the tunnel (avoids stuck navigation)
-    if grep -q -E '^DNS\s*=' "$WIREGUARD_CONFIG_PATH" 2>/dev/null; then
-      DNS_LINE=$(grep -E '^DNS\s*=' "$WIREGUARD_CONFIG_PATH" | sed 's/^DNS\s*=\s*//; s/,\s*/,/g' | tr -d ' ')
-      if [ -n "$DNS_LINE" ]; then
-        : > /etc/resolv.conf
-        for dns in $(echo "$DNS_LINE" | tr ',' '\n'); do
-          [ -n "$dns" ] && echo "nameserver $dns" >> /etc/resolv.conf
-        done
-        echo "[entrypoint] DNS set from WireGuard config"
-      fi
-    fi
-    echo "[entrypoint] WireGuard interface $IFACE up (minimal mode)"
+    # Route only browser traffic through the VPN via a local SOCKS proxy.
+    # The proxy binds outgoing connections to the WireGuard IP; source-based policy
+    # routing sends those packets through the tunnel. DNS stays on the main table.
+    WG_ADDR=$(grep -E '^Address\s*=' "$WIREGUARD_CONFIG_PATH" | sed 's/^Address\s*=\s*//; s|/.*||; s/,.*//; s/\s//g; q')
+    WG_TABLE=200
+    ip route add default dev "$IFACE" table $WG_TABLE 2>/dev/null || true
+    ip rule add from "$WG_ADDR" lookup $WG_TABLE priority 100 2>/dev/null || true
+    SOCKS_PORT="${WIREGUARD_SOCKS_PORT:-1080}"
+    export WIREGUARD_SOCKS_PROXY="socks5://127.0.0.1:${SOCKS_PORT}"
+    export WIREGUARD_LOCAL_ADDR="$WG_ADDR"
+    NODE=$(command -v node)
+    [ -z "$NODE" ] && NODE=/usr/local/bin/node
+    ($NODE /app/socks-server.js &)
+    sleep 1
+    echo "[entrypoint] WireGuard interface $IFACE up (proxy: $WIREGUARD_SOCKS_PROXY, bind: $WG_ADDR)"
   fi
   # WireGuard status and auth
   if command -v wg >/dev/null 2>&1; then

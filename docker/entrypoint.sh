@@ -31,33 +31,24 @@ if [ -n "$WIREGUARD_CONFIG_PATH" ] && [ -f "$WIREGUARD_CONFIG_PATH" ]; then
     MTU=$(grep -E '^MTU\s*=' "$WIREGUARD_CONFIG_PATH" | sed 's/^MTU\s*=\s*//; s/\s.*//; q')
     [ -n "$MTU" ] && ip link set dev "$IFACE" mtu "$MTU" 2>/dev/null || true
     ip link set up dev "$IFACE"
-    # Replace default route so internet traffic goes through the VPN, but keep route to Docker/host
-    ETH_DEV=$(ip route show default 2>/dev/null | awk '{print $5}')
-    DEFGW=$(ip route show default 2>/dev/null | awk '{print $3}')
-    [ -n "$ETH_DEV" ] && SAVED_ROUTES=$(ip route show dev "$ETH_DEV" 2>/dev/null | grep -v '^default' | awk '{print $1}' | tr '\n' ' ')
-    ip route del default 2>/dev/null || true
-    ip route add default dev "$IFACE"
-    ip -6 route del default 2>/dev/null || true
-    ip -6 route add default dev "$IFACE" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add "$DEFGW"/32 dev "$ETH_DEV" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && for net in $SAVED_ROUTES; do
-      [ -n "$net" ] && ip route add "$net" dev "$ETH_DEV" 2>/dev/null || true
-    done
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add 192.168.0.0/16 via "$DEFGW" dev "$ETH_DEV" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add 172.16.0.0/12 via "$DEFGW" dev "$ETH_DEV" 2>/dev/null || true
-    [ -n "$ETH_DEV" ] && [ -n "$DEFGW" ] && ip route add 10.0.0.0/8 via "$DEFGW" dev "$ETH_DEV" 2>/dev/null || true
-    if grep -q -E '^DNS\s*=' "$WIREGUARD_CONFIG_PATH" 2>/dev/null; then
-      DNS_LINE=$(grep -E '^DNS\s*=' "$WIREGUARD_CONFIG_PATH" | sed 's/^DNS\s*=\s*//; s/,\s*/,/g' | tr -d ' ')
-      if [ -n "$DNS_LINE" ]; then
-        : > /etc/resolv.conf
-        for dns in $(echo "$DNS_LINE" | tr ',' '\n'); do
-          [ -n "$dns" ] && echo "nameserver $dns" >> /etc/resolv.conf
-        done
-        echo "[entrypoint] DNS set from WireGuard config"
-      fi
-    fi
+    # Route only browser traffic through the VPN via a SOCKS proxy (avoids ERR_BLOCKED_BY_CLIENT).
+    # Exclude DNS/local (127.0.0.0/8) from the mark so the proxy can resolve hostnames.
+    WG_TABLE=200
+    SOCKS_UID=65534
+    ip route add default dev "$IFACE" table $WG_TABLE 2>/dev/null || true
+    ip -6 route add default dev "$IFACE" table $WG_TABLE 2>/dev/null || true
+    ip rule add fwmark 1 table $WG_TABLE 2>/dev/null || true
+    iptables -t mangle -A OUTPUT -m owner --uid-owner $SOCKS_UID -d 127.0.0.0/8 -j ACCEPT 2>/dev/null || true
+    iptables -t mangle -A OUTPUT -m owner --uid-owner $SOCKS_UID -d ::1/128 -j ACCEPT 2>/dev/null || true
+    iptables -t mangle -A OUTPUT -m owner --uid-owner $SOCKS_UID -j MARK --set-mark 1 2>/dev/null || true
+    SOCKS_PORT="${WIREGUARD_SOCKS_PORT:-1080}"
+    export WIREGUARD_SOCKS_PROXY="socks5://127.0.0.1:${SOCKS_PORT}"
+    NODE=$(command -v node)
+    [ -z "$NODE" ] && NODE=/usr/local/bin/node
+    (su nobody -s /bin/sh -c "cd /app/agent && exec $NODE socks-server.js" &)
+    sleep 1
     WG_UP=1
-    echo "[entrypoint] WireGuard interface $IFACE up (minimal mode)"
+    echo "[entrypoint] WireGuard interface $IFACE up (proxy mode: browser uses $WIREGUARD_SOCKS_PROXY)"
   fi
   # WireGuard status and auth
   if [ "$WG_UP" = 1 ] && command -v wg >/dev/null 2>&1; then

@@ -21,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     wget \
     iproute2 \
-    iptables \
     openresolv \
     wireguard-tools \
     xvfb \

@@ -91,7 +91,8 @@ class Agent {
     try {
       switch (type) {
         case 'navigate':
-          await this.browserManager.createSession(aid, command.proxy || null, command.user_agent || null);
+          const proxy = command.proxy ?? process.env.WIREGUARD_SOCKS_PROXY ?? null;
+          await this.browserManager.createSession(aid, proxy, command.user_agent || null);
           await this.analyzer.startAnalysis(aid, command.url, (evt) => this.send(evt));
           console.log(`[agent] Analysis ${aid} is live, waiting for stop command`);
           break;

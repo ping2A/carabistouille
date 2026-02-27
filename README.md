@@ -562,7 +562,7 @@ cargo run -- --docker-agent --wireguard-config /path/to/wg0.conf
 
 Or use the environment variable: `WIREGUARD_CONFIG_PATH=/path/to/wg0.conf`.
 
-If `WIREGUARD_CONFIG_PATH` is set and the file exists, the entrypoint runs `wg-quick up` before starting the app so that all outbound traffic (including Chromium) uses the VPN. Incoming connections (e.g. to the server) are unchanged; only traffic originating from the agent/browser is routed through WireGuard.
+If `WIREGUARD_CONFIG_PATH` is set and the file exists, the entrypoint brings up WireGuard. When `wg-quick` cannot be used (e.g. in Docker without full privileges), the container uses **proxy mode**: the default route is left unchanged so the agent can reach the server and Chrome is not affected by system-wide VPN routing. A local SOCKS5 proxy is started; only the browser is configured to use it (`WIREGUARD_SOCKS_PROXY`). The proxy’s outbound traffic is policy-routed through the WireGuard interface, so only browser traffic goes through the VPN. This avoids `net::ERR_BLOCKED_BY_CLIENT` and similar issues. Optional: set `WIREGUARD_SOCKS_PORT` (default `1080`) to change the proxy port.
 
 ## TLS / HTTPS
 
