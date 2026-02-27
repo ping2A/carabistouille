@@ -96,6 +96,8 @@ pub async fn start_container(
     };
     if let Some(ref vol) = wireguard_volume {
         args.push("--cap-add=NET_ADMIN");
+        args.push("--sysctl");
+        args.push("net.ipv4.conf.all.src_valid_mark=1");
         args.push("-v");
         args.push(vol.as_str());
         args.push("-e");

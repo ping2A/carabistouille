@@ -537,7 +537,7 @@ Mount a volume at `/data` to persist the database. The image uses system Chromiu
 
 You can route **all** analysis traffic (browser requests) through a WireGuard VPN. The agent (or the whole stack in Docker) brings up the WireGuard interface at startup so that every Chromium request goes through the VPN.
 
-**Docker Compose (single container):** Mount your WireGuard config and set the path. The container needs `NET_ADMIN` to create the interface:
+**Docker Compose (single container):** Mount your WireGuard config and set the path. The container needs `NET_ADMIN` and a sysctl that `wg-quick` uses:
 
 ```yaml
 services:
@@ -545,6 +545,8 @@ services:
     build: .
     cap_add:
       - NET_ADMIN
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
     environment:
       - WIREGUARD_CONFIG_PATH=/etc/wireguard/wg0.conf
     volumes:
