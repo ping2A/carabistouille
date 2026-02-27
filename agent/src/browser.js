@@ -128,19 +128,24 @@ export class BrowserManager {
   }
 
   /**
-   * Capture the viewport as base64-encoded WebP (quality 20, optimizeForSpeed).
+   * Capture the viewport as base64 (format/quality from config; optimizeForSpeed for fluid analysis).
    * @param {string} analysisId - Analysis UUID.
    * @returns {Promise<{ data: string, width: number, height: number } | null>}
    */
   async takeScreenshot(analysisId) {
     try {
       const page = await this.getPage(analysisId);
-      const raw = await page.screenshot({
-        type: 'webp',
-        quality: 20,
+      const format = config.screenshots?.format || 'webp';
+      const quality = config.screenshots?.quality ?? 35;
+      const opts = {
+        type: format,
         optimizeForSpeed: true,
         captureBeyondViewport: false,
-      });
+      };
+      if (format === 'webp' || format === 'jpeg') {
+        opts.quality = quality;
+      }
+      const raw = await page.screenshot(opts);
       return {
         data: Buffer.from(raw).toString('base64'),
         width: this.viewportWidth,

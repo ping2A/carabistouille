@@ -252,10 +252,11 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 report.scripts.len(),
                 report.risk_factors.len()
             );
-            if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+            // Build merged report (server-accumulated raw_files, page_source, etc.) and update state.
+            // Do not call state.analyses.get() while holding get_mut() — DashMap would deadlock.
+            let merged = if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
                 analysis.status = AnalysisStatus::Complete;
                 analysis.completed_at = Some(chrono::Utc::now());
-                // Save the final screenshot as the last timeline entry
                 if let Some(data) = analysis.screenshot.clone() {
                     let now = chrono::Utc::now().timestamp_millis() as f64;
                     analysis.screenshot_timeline.push(crate::models::ScreenshotEntry {
@@ -263,7 +264,6 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                         timestamp: now,
                     });
                 }
-                // Preserve server-accumulated fields before overwriting
                 let mut merged = report.clone();
                 if let Some(existing) = &analysis.report {
                     merged.raw_files = existing.raw_files.clone();
@@ -275,13 +275,26 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                         merged.detection_attempts = existing.detection_attempts.clone();
                     }
                 }
-                analysis.report = Some(merged);
-            }
+                analysis.report = Some(merged.clone());
+                Some(merged)
+            } else {
+                None
+            };
+
             state.cancel_analysis_timeout(analysis_id);
             if let Some(a) = state.analyses.get(analysis_id) {
                 state.persist_analysis(a.clone());
             }
-            forward_to_viewer(state, analysis_id, &event);
+            // Forward merged report to viewers so Raw/Screenshot tabs get server-accumulated data
+            if let Some(merged) = merged {
+                let complete_event = AgentEvent::AnalysisComplete {
+                    analysis_id: analysis_id.clone(),
+                    report: merged,
+                };
+                forward_to_viewer(state, analysis_id, &complete_event);
+            } else {
+                forward_to_viewer(state, analysis_id, &event);
+            }
         }
 
         AgentEvent::ElementInfo { analysis_id, tag, .. } => {
@@ -407,8 +420,8 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
     }
 }
 
-/// Minimum interval (ms) between forwarding screenshots to viewers to avoid flooding the channel.
-const SCREENSHOT_FORWARD_INTERVAL_MS: f64 = 1000.0;
+/// Minimum interval (ms) between forwarding screenshots to viewers. Lower = more fluid UI; 300–500 is a good balance.
+const SCREENSHOT_FORWARD_INTERVAL_MS: f64 = 400.0;
 
 /// Serialize the event and send it to all viewers subscribed to this analysis.
 fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {

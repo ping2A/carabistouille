@@ -292,10 +292,14 @@ export class Analyzer {
         console.warn(`[analyzer] Initial screenshot: ${e.message}`);
       }
 
-      // Start periodic screenshots only after navigation (so we don't flood with about:blank)
+      // Periodic screenshots at config interval; skip a tick if previous capture still in flight (keeps analysis fluid).
+      const intervalMs = config.screenshots?.intervalMs ?? 800;
       let screenshotTick = 0;
+      let screenshotInFlight = false;
       const screenshotInterval = setInterval(async () => {
         if (state.aborted) return;
+        if (screenshotInFlight) return;
+        screenshotInFlight = true;
         try {
           const shot = await this.browserManager.takeScreenshot(analysisId);
           if (shot) {
@@ -303,13 +307,15 @@ export class Analyzer {
           }
         } catch (err) {
           console.error(`[analyzer] Screenshot interval error: ${err.message}`);
+        } finally {
+          screenshotInFlight = false;
         }
         screenshotTick++;
         if (screenshotTick % 2 === 0) {
           this._drainAndReportClipboard(analysisId, 'poll');
           this._drainAndReportDetection(analysisId);
         }
-      }, 1500);
+      }, intervalMs);
       this.screenshotIntervals.set(analysisId, screenshotInterval);
 
       // Capture the rendered page HTML source

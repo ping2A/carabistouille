@@ -82,9 +82,11 @@ const config = {
   },
 
   screenshots: {
-    format: 'jpeg',
-    quality: 65,
-    intervalMs: 500,
+    // Format and quality for live viewer + timeline. WebP is smaller than JPEG at same quality; lower quality = faster and more fluid.
+    format: 'webp',
+    quality: 35,
+    // Interval (ms) between periodic screenshots. Lower = more fluid but more CPU/bandwidth; 600–1000 is a good balance.
+    intervalMs: 800,
   },
 };
 
