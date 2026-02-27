@@ -78,6 +78,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     xdg-utils \
     iproute2 \
+    resolvconf \
     wireguard-tools \
     xvfb \
     && rm -rf /var/lib/apt/lists/*

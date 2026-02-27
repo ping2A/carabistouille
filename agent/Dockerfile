@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     wget \
     iproute2 \
+    resolvconf \
     wireguard-tools \
     xvfb \
   && rm -rf /var/lib/apt/lists/*
