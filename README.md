@@ -523,10 +523,40 @@ docker run --rm -p 3000:3000 -v carabistouille-data:/data carabistouille
 | `PORT` | `3000` | Server listen port (must match container port) |
 | `SERVER_URL` | `ws://127.0.0.1:3000/ws/agent` | Agent → server WebSocket (leave default in single-container setup) |
 | `DATABASE_PATH` | `/data/carabistouille.db` | SQLite file path (use `/data/...` to persist with a volume) |
+| `WIREGUARD_CONFIG_PATH` | — | Path to WireGuard config inside the container (e.g. `/etc/wireguard/wg0.conf`); if set, all browser traffic is routed through the VPN (requires `cap_add: [NET_ADMIN]` and a mounted config). |
 
 Mount a volume at `/data` to persist the database. The image uses system Chromium and the existing agent config (including `--no-sandbox` for Docker).
 
 **Agent-only in Docker (server on host):** Run the server on your machine and the agent in a container with `cargo run -- --docker-agent`. Add `--real-chrome` to run Chrome in headed mode (non-headless) inside the container using Xvfb for a more realistic browser and better anti-detection.
+
+### WireGuard VPN output
+
+You can route **all** analysis traffic (browser requests) through a WireGuard VPN. The agent (or the whole stack in Docker) brings up the WireGuard interface at startup so that every Chromium request goes through the VPN.
+
+**Docker Compose (single container):** Mount your WireGuard config and set the path. The container needs `NET_ADMIN` to create the interface:
+
+```yaml
+services:
+  app:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - WIREGUARD_CONFIG_PATH=/etc/wireguard/wg0.conf
+    volumes:
+      - carabistouille-data:/data
+      - /path/on/host/wg0.conf:/etc/wireguard/wg0.conf:ro
+```
+
+**Agent-only container (`--docker-agent`):** Pass the path to your WireGuard config on the host; the server will mount it and run the container with `NET_ADMIN`:
+
+```bash
+cargo run -- --docker-agent --wireguard-config /path/to/wg0.conf
+```
+
+Or use the environment variable: `WIREGUARD_CONFIG_PATH=/path/to/wg0.conf`.
+
+If `WIREGUARD_CONFIG_PATH` is set and the file exists, the entrypoint runs `wg-quick up` before starting the app so that all outbound traffic (including Chromium) uses the VPN. Incoming connections (e.g. to the server) are unchanged; only traffic originating from the agent/browser is routed through WireGuard.
 
 ## TLS / HTTPS
 
@@ -585,6 +615,7 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | `--docker-agent` | Run the Puppeteer agent inside a Docker container instead of a local process. The server builds the image from `agent/` and starts the container; the agent connects back via `host.docker.internal`. |
 | `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
 | `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
+| `--wireguard-config <path>` | When used with `--docker-agent`: mount this WireGuard config so all agent (browser) traffic goes through the VPN. Requires host path to a `.conf` file. |
 
 Examples: `cargo run -- --clean-db` or `./carabistouille --docker-agent --real-chrome`.
 
@@ -600,6 +631,7 @@ Examples: `cargo run -- --clean-db` or `./carabistouille --docker-agent --real-c
 | `TLS_SELF_SIGNED` | `false` | Set to `true` to auto-generate a self-signed cert |
 | `SERVER_URL` | `ws://localhost:3000/ws/agent` | Agent: server WebSocket URL |
 | `TLS_REJECT_UNAUTHORIZED` | `false` | Agent: reject invalid TLS certs (set `true` for production) |
+| `WIREGUARD_CONFIG_PATH` | — | Path to WireGuard config file; when set, the agent/container brings up the interface so all browser traffic goes through the VPN (Docker: use with `cap_add: [NET_ADMIN]` and mount the config). |
 
 ## REST API
 

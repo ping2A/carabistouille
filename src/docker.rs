@@ -33,10 +33,12 @@ pub async fn ensure_image(agent_dir: &str) -> Result<(), String> {
 /// `server_port` is the host port the server listens on.
 /// `browser_engine` selects puppeteer or puppeteer-extra inside the container.
 /// `real_chrome`: if true, run Chrome in headed mode (HEADLESS=false) with Xvfb for a more realistic browser.
+/// `wireguard_config`: if Some(path), mount the WireGuard config and run with NET_ADMIN so all traffic goes through the VPN.
 pub async fn start_container(
     server_port: u16,
     browser_engine: &str,
     real_chrome: bool,
+    wireguard_config: Option<&std::path::Path>,
 ) -> Result<String, String> {
     // Remove stale container if any
     let _ = Command::new("docker")
@@ -49,11 +51,12 @@ pub async fn start_container(
     let server_url = format!("ws://host.docker.internal:{server_port}/ws/agent");
 
     tracing::info!(
-        "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={})",
+        "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={}, wireguard={})",
         CONTAINER_NAME,
         browser_engine,
         server_url,
         real_chrome,
+        wireguard_config.is_some(),
     );
 
     let server_url_env = format!("SERVER_URL={server_url}");
@@ -76,6 +79,27 @@ pub async fn start_container(
     if real_chrome {
         args.push("-e");
         args.push("HEADLESS=false");
+    }
+    let wireguard_volume = if let Some(path) = wireguard_config {
+        let path_str = path
+            .to_str()
+            .ok_or_else(|| "WireGuard config path is not valid UTF-8".to_string())?;
+        if !path.exists() {
+            return Err(format!(
+                "WireGuard config path does not exist: {}",
+                path.display()
+            ));
+        }
+        Some(format!("{}:/etc/wireguard/wg0.conf:ro", path_str))
+    } else {
+        None
+    };
+    if let Some(ref vol) = wireguard_volume {
+        args.push("--cap-add=NET_ADMIN");
+        args.push("-v");
+        args.push(vol.as_str());
+        args.push("-e");
+        args.push("WIREGUARD_CONFIG_PATH=/etc/wireguard/wg0.conf");
     }
     args.push(IMAGE_NAME);
 

@@ -5,6 +5,13 @@ set -e
 Xvfb :99 -screen 0 1280x800x24 -ac &
 export DISPLAY=:99
 
+# WireGuard: if WIREGUARD_CONFIG_PATH is set and the config exists, bring up the interface
+# so all outbound traffic (including Chromium) goes through the VPN.
+if [ -n "$WIREGUARD_CONFIG_PATH" ] && [ -f "$WIREGUARD_CONFIG_PATH" ]; then
+  echo "[entrypoint] Bringing up WireGuard from $WIREGUARD_CONFIG_PATH"
+  wg-quick up "$WIREGUARD_CONFIG_PATH" || { echo "[entrypoint] WireGuard up failed"; exit 1; }
+fi
+
 # Run the Rust server in the background from /app (serves UI from ./web, DB from DATABASE_PATH)
 cd /app && /usr/local/bin/carabistouille &
 SERVER_PID=$!

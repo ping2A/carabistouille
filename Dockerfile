@@ -56,7 +56,7 @@ COPY agent ./
 # -----------------------------------------------------------------------------
 FROM node:20-bookworm-slim
 
-# Chromium runtime dependencies + Xvfb for real (headed) Chrome when HEADLESS=false
+# Chromium runtime dependencies + Xvfb for real (headed) Chrome + WireGuard for VPN output
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     chromium \
@@ -77,6 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    wireguard-tools \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 

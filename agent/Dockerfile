@@ -1,6 +1,6 @@
 FROM --platform=linux/amd64 node:20-slim
 
-# Chrome dependencies + Xvfb for real Chrome (headed mode) in Docker
+# Chrome dependencies + Xvfb for real Chrome (headed mode) + WireGuard for VPN output
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     fonts-liberation \
@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     xdg-utils \
     wget \
+    wireguard-tools \
     xvfb \
   && rm -rf /var/lib/apt/lists/*
 

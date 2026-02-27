@@ -15,9 +15,11 @@ struct CliArgs {
     browser_engine: String,
     /// When using --docker-agent: run Chrome in headed mode (real Chrome) with Xvfb for better anti-detection.
     real_chrome: bool,
+    /// When using --docker-agent: path to WireGuard config so all agent traffic goes through the VPN.
+    wireguard_config: Option<std::path::PathBuf>,
 }
 
-/// Parse command-line arguments: --clean-db, --docker-agent, --real-chrome, --browser-engine.
+/// Parse command-line arguments: --clean-db, --docker-agent, --real-chrome, --browser-engine, --wireguard-config.
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let clean_db = args.iter().any(|a| a == "--clean-db");
@@ -32,11 +34,19 @@ fn parse_args() -> CliArgs {
         .or_else(|| std::env::var("BROWSER_ENGINE").ok())
         .unwrap_or_else(|| "puppeteer-extra".to_string());
 
+    let wireguard_config = args
+        .iter()
+        .position(|a| a == "--wireguard-config")
+        .and_then(|i| args.get(i + 1))
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var("WIREGUARD_CONFIG_PATH").ok().map(std::path::PathBuf::from));
+
     CliArgs {
         clean_db,
         docker_agent,
         browser_engine,
         real_chrome,
+        wireguard_config,
     }
 }
 
@@ -147,7 +157,13 @@ async fn main() {
             std::process::exit(1);
         }
 
-        match carabistouille::docker::start_container(port, &cli.browser_engine, cli.real_chrome).await {
+        match carabistouille::docker::start_container(
+            port,
+            &cli.browser_engine,
+            cli.real_chrome,
+            cli.wireguard_config.as_deref(),
+        )
+        .await {
             Ok(_container_id) => {
                 tracing::info!("Docker agent container started — logs streaming below:");
                 Some(carabistouille::docker::stream_logs())
