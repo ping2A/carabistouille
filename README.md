@@ -24,7 +24,8 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
    +--- /admin.html                     |      /ws/viewer/:id     Network + Console       |
                                         |      report_snapshot    Detection monitors      |
                                    REST API  on viewer connect    Risk scoring            |
-                                   /api/*   fwd throttle 1s       Clipboard hooks        |
+                                   /api/*   fwd throttle 1s       Optional WireGuard VPN  |
+                                                                 (route all traffic)     |
 ```
 
 ### Component Responsibilities
@@ -67,6 +68,7 @@ A malicious URL analyzer with remote browser instrumentation. Submit suspicious 
 |  |                  |  |  Page source     |  |  puppeteer-extra|
 |  |                  |  |  Detection drain |  |  Screenshots    | |
 |  |                  |  |  Clipboard poll  |  |  Clipboard hooks| |
+|  |                  |  |  WireGuard VPN   |  |  proxy per run   | |
 |  +------------------+  +------------------+  +-----------------+ |
 +------------------------------------------------------------------+
 ```
@@ -617,7 +619,7 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
 | `--wireguard-config <path>` | When used with `--docker-agent`: mount this WireGuard config so all agent (browser) traffic goes through the VPN. Requires host path to a `.conf` file. |
 
-Examples: `cargo run -- --clean-db` or `./carabistouille --docker-agent --real-chrome`.
+Examples: `cargo run -- --clean-db`, `./carabistouille --docker-agent --real-chrome`, or `./carabistouille --docker-agent --wireguard-config /path/to/wg0.conf` to route all browser traffic through a WireGuard VPN.
 
 ### Environment variables
 
