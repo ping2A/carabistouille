@@ -20,6 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     xdg-utils \
     wget \
+    iproute2 \
     wireguard-tools \
     xvfb \
   && rm -rf /var/lib/apt/lists/*

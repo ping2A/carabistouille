@@ -522,7 +522,9 @@ docker run --rm -p 3000:3000 -v carabistouille-data:/data carabistouille
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` | Server listen port (must match container port) |
+| `HOST` | `0.0.0.0` | IP to bind to inside the container (e.g. `0.0.0.0` for all interfaces). |
+| `PORT` | `3000` | Server listen port (must match container port mapping). |
+| `LISTEN` | — | Override bind address as `host:port` (e.g. `0.0.0.0:3000`). Overrides `HOST` and `PORT`. |
 | `SERVER_URL` | `ws://127.0.0.1:3000/ws/agent` | Agent → server WebSocket (leave default in single-container setup) |
 | `DATABASE_PATH` | `/data/carabistouille.db` | SQLite file path (use `/data/...` to persist with a volume) |
 | `WIREGUARD_CONFIG_PATH` | — | Path to WireGuard config inside the container (e.g. `/etc/wireguard/wg0.conf`); if set, all browser traffic is routed through the VPN (requires `cap_add: [NET_ADMIN]` and a mounted config). |
@@ -618,14 +620,17 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
 | `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
 | `--wireguard-config <path>` | When used with `--docker-agent`: mount this WireGuard config so all agent (browser) traffic goes through the VPN. Requires host path to a `.conf` file. |
+| `--listen <addr>` | Bind address in `host:port` form (e.g. `127.0.0.1:3000` or `0.0.0.0:8080`). Overrides `HOST` and `PORT`. |
 
-Examples: `cargo run -- --clean-db`, `./carabistouille --docker-agent --real-chrome`, or `./carabistouille --docker-agent --wireguard-config /path/to/wg0.conf` to route all browser traffic through a WireGuard VPN.
+Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to bind to localhost on port 8080, `./carabistouille --docker-agent --real-chrome`, or `./carabistouille --docker-agent --wireguard-config /path/to/wg0.conf` to route all browser traffic through a WireGuard VPN.
 
 ### Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` | Server listen port |
+| `HOST` | `0.0.0.0` | IP address to bind to (e.g. `127.0.0.1` for localhost only). Ignored if `LISTEN` is set. |
+| `PORT` | `3000` | Server listen port. Ignored if `LISTEN` is set. |
+| `LISTEN` | — | Full bind address `host:port` (e.g. `127.0.0.1:3000`). Overrides `HOST` and `PORT` when set. |
 | `RUST_LOG` | `carabistouille=debug` | Server log level |
 | `DATABASE_PATH` | `carabistouille.db` | Path to SQLite database file (analyses persistence) |
 | `TLS_CERT` | — | Path to PEM certificate file (enables TLS) |

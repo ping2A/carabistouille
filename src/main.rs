@@ -17,6 +17,8 @@ struct CliArgs {
     real_chrome: bool,
     /// When using --docker-agent: path to WireGuard config so all agent traffic goes through the VPN.
     wireguard_config: Option<std::path::PathBuf>,
+    /// Override listen address (host:port). Takes precedence over HOST and PORT.
+    listen: Option<String>,
 }
 
 /// Parse command-line arguments: --clean-db, --docker-agent, --real-chrome, --browser-engine, --wireguard-config.
@@ -38,8 +40,16 @@ fn parse_args() -> CliArgs {
         .iter()
         .position(|a| a == "--wireguard-config")
         .and_then(|i| args.get(i + 1))
+        .cloned()
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var("WIREGUARD_CONFIG_PATH").ok().map(std::path::PathBuf::from));
+
+    let listen = args
+        .iter()
+        .position(|a| a == "--listen")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .or_else(|| std::env::var("LISTEN").ok());
 
     CliArgs {
         clean_db,
@@ -47,6 +57,7 @@ fn parse_args() -> CliArgs {
         browser_engine,
         real_chrome,
         wireguard_config,
+        listen,
     }
 }
 
@@ -136,11 +147,21 @@ async fn main() {
     let state = AppState::new(analyses, db_tx, cli.docker_agent, cli.real_chrome);
     let app = build_router(state);
 
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(3000);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let addr: SocketAddr = if let Some(ref listen_str) = cli.listen {
+        listen_str
+            .parse()
+            .unwrap_or_else(|_| panic!("Invalid --listen / LISTEN address '{}' (use host:port, e.g. 127.0.0.1:3000)", listen_str))
+    } else {
+        let host_str = std::env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let host: std::net::IpAddr = host_str
+            .parse()
+            .unwrap_or_else(|_| panic!("Invalid HOST '{}' (use an IP address)", host_str));
+        let port: u16 = std::env::var("PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(3000);
+        SocketAddr::new(host, port)
+    };
 
     // --- Docker agent management ---
     let _docker_log_handle: Option<tokio::task::JoinHandle<()>> = if cli.docker_agent {
@@ -158,7 +179,7 @@ async fn main() {
         }
 
         match carabistouille::docker::start_container(
-            port,
+            addr.port(),
             &cli.browser_engine,
             cli.real_chrome,
             cli.wireguard_config.as_deref(),

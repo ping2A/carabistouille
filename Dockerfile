@@ -77,6 +77,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
+    iproute2 \
     wireguard-tools \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
