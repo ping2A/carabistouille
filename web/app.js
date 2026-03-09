@@ -9,6 +9,41 @@ const USER_AGENT_PRESETS = {
   'firefox-desktop': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
 };
 
+/** Verdict tag values stored in analysis.tags. */
+const VERDICT_TAGS = Object.freeze({
+  FALSE_POSITIVE: 'false positive',
+  MALICIOUS: 'malicious',
+  PHISHING: 'phishing',
+  CLICK_FIX: 'click fix',
+});
+const VERDICT_TAG_LIST = [VERDICT_TAGS.FALSE_POSITIVE, VERDICT_TAGS.MALICIOUS, VERDICT_TAGS.PHISHING, VERDICT_TAGS.CLICK_FIX];
+
+/** Get verdict and subtype from a tags array for UI state. */
+function getVerdictFromTags(tags) {
+  if (!Array.isArray(tags)) return { verdict: null, subtype: null };
+  const set = new Set(tags.map((t) => String(t).toLowerCase()));
+  let verdict = null;
+  let subtype = null;
+  if (set.has(VERDICT_TAGS.FALSE_POSITIVE)) verdict = 'false_positive';
+  else if (set.has(VERDICT_TAGS.MALICIOUS)) {
+    verdict = 'malicious';
+    if (set.has(VERDICT_TAGS.PHISHING)) subtype = 'phishing';
+    else if (set.has(VERDICT_TAGS.CLICK_FIX)) subtype = 'click_fix';
+  }
+  return { verdict, subtype };
+}
+
+/** Label for display next to status (one line: "False positive" or "Phishing" etc.). */
+function getVerdictLabel(tags) {
+  if (!Array.isArray(tags)) return null;
+  const s = new Set(tags.map((t) => String(t).toLowerCase()));
+  if (s.has(VERDICT_TAGS.FALSE_POSITIVE)) return 'False positive';
+  if (s.has(VERDICT_TAGS.PHISHING)) return 'Phishing';
+  if (s.has(VERDICT_TAGS.CLICK_FIX)) return 'Click fix';
+  if (s.has(VERDICT_TAGS.MALICIOUS)) return 'Malicious';
+  return null;
+}
+
 /**
  * Main dashboard UI: URL submit, analysis list, viewer WebSocket, viewport interaction,
  * report panels (Network, Scripts, Console, Raw, Screenshots, Security), risk badge.
@@ -30,15 +65,19 @@ class App {
     this.pageSource = null;
     this.domSnapshot = null;
     this.storageCapture = null;
+    this.phishingIndicators = [];
     this.securityHeaders = [];
     this.redirectChain = [];
     this.finalUrl = null;
+    this.pageTitle = null;
     this.screenshotTimeline = [];
     this.screenshotTimelineCount = 0;
     this.lastMouseMoveTime = 0;
     this.screenshotCount = 0;
     this.wsEventCount = 0;
     this.analysisStartTime = null;
+    this._reportSearchQuery = '';
+    this._scrubberIndex = 0;
 
     this.initElements();
     this.initEventListeners();
@@ -49,8 +88,543 @@ class App {
     }
     this.loadAnalyses();
     this.pollAgentStatus();
+    this.initPermalink();
+    this.initSettings();
+    this.initNotesTags();
+    this.initReportActions();
+    this.initReportSearch();
+    this.initAdvancedFilters();
+    this.initScrubber();
+    this.initGeoLocale();
+    this.initTagFilter();
 
     console.log('[ui] App initialized');
+  }
+
+  /** Read ?id= from URL and select that analysis if present. */
+  initPermalink() {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get('id');
+    if (id) {
+      this.selectAnalysis(id);
+    }
+  }
+
+  /** Settings modal: open/close; load/save VirusTotal API key from localStorage. */
+  initSettings() {
+    if (!this.settingsBtn || !this.settingsModal) return;
+    const VT_KEY_STORAGE = 'virustotal_api_key';
+    this.settingsBtn.addEventListener('click', () => {
+      if (this.virustotalKeyInput) {
+        try {
+          this.virustotalKeyInput.value = localStorage.getItem(VT_KEY_STORAGE) || '';
+        } catch (_) {}
+      }
+      this.settingsModal.style.display = 'flex';
+      this.settingsModal.setAttribute('aria-hidden', 'false');
+    });
+    const saveAndClose = () => {
+      if (this.virustotalKeyInput) {
+        try {
+          const v = this.virustotalKeyInput.value.trim();
+          if (v) localStorage.setItem(VT_KEY_STORAGE, v);
+          else localStorage.removeItem(VT_KEY_STORAGE);
+        } catch (_) {}
+      }
+      this.settingsModal.style.display = 'none';
+      this.settingsModal.setAttribute('aria-hidden', 'true');
+    };
+    this.settingsClose.addEventListener('click', saveAndClose);
+    this.settingsModal.addEventListener('click', (e) => {
+      if (e.target === this.settingsModal) saveAndClose();
+    });
+  }
+
+  /** Geo/locale row toggle and include in submit. */
+  initGeoLocale() {
+    if (!this.geoToggle || !this.geoLocaleRow) return;
+    this.geoToggle.addEventListener('click', () => {
+      const isHidden = this.geoLocaleRow.style.display === 'none';
+      this.geoLocaleRow.style.display = isHidden ? 'grid' : 'none';
+      this.geoToggle.classList.toggle('active', isHidden);
+      const icon = this.geoToggle.querySelector('.geo-toggle-icon');
+      const text = this.geoToggle.querySelector('.geo-toggle-text');
+      if (icon) icon.textContent = isHidden ? '▲' : '▼';
+      if (text) text.textContent = isHidden ? 'Hide location' : 'Set location';
+    });
+  }
+
+  /** Notes/tags: verdict buttons only (no custom tags), save via PATCH. */
+  initNotesTags() {
+    if (!this.notesInput || !this.tagsChips || !this.saveNotesTagsBtn) return;
+    this.saveNotesTagsBtn.addEventListener('click', () => this.saveNotesAndTags());
+    document.querySelectorAll('.verdict-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const verdict = btn.dataset.verdict;
+        this.setVerdict(verdict, null);
+        if (verdict === 'malicious' && this.verdictSubtypeRow) this.verdictSubtypeRow.style.display = 'flex';
+        else if (this.verdictSubtypeRow) this.verdictSubtypeRow.style.display = 'none';
+        this.updateVerdictButtonsState();
+      });
+    });
+    document.querySelectorAll('.verdict-subtype-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.setVerdict('malicious', btn.dataset.subtype);
+        this.updateVerdictButtonsState();
+      });
+    });
+  }
+
+  /** Replace verdict-related tags with the new verdict (and optional subtype). Only predefined verdict tags are used. */
+  setVerdict(verdict, subtype) {
+    let tags = this.getCurrentTags().filter((t) => VERDICT_TAG_LIST.includes(t.toLowerCase()));
+    if (verdict === 'false_positive') tags = [VERDICT_TAGS.FALSE_POSITIVE];
+    else if (verdict === 'malicious') {
+      tags = [VERDICT_TAGS.MALICIOUS];
+      if (subtype === 'phishing') tags.push(VERDICT_TAGS.PHISHING);
+      else if (subtype === 'click_fix') tags.push(VERDICT_TAGS.CLICK_FIX);
+    }
+    this.renderTagsChips(tags);
+    this.saveNotesAndTags();
+  }
+
+  /** Sync verdict buttons and subtype row with current tags. */
+  updateVerdictButtonsState() {
+    const tags = this.getCurrentTags();
+    const { verdict, subtype } = getVerdictFromTags(tags);
+    document.querySelectorAll('.verdict-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.verdict === verdict);
+    });
+    document.querySelectorAll('.verdict-subtype-btn').forEach((btn) => {
+      btn.classList.toggle('active', verdict === 'malicious' && btn.dataset.subtype === subtype);
+    });
+    if (this.verdictSubtypeRow) this.verdictSubtypeRow.style.display = verdict === 'malicious' ? 'flex' : 'none';
+    this.updateReportVerdictBadge(tags);
+  }
+
+  /** Show verdict badge in report header. */
+  updateReportVerdictBadge(tags) {
+    if (!this.reportVerdictBadge) return;
+    const label = getVerdictLabel(tags);
+    if (!label) {
+      this.reportVerdictBadge.style.display = 'none';
+      return;
+    }
+    this.reportVerdictBadge.textContent = label;
+    this.reportVerdictBadge.className = 'verdict-badge ' + (label === 'False positive' ? 'false-positive' : 'malicious');
+    if (label === 'Phishing') this.reportVerdictBadge.classList.add('phishing');
+    else if (label === 'Click fix') this.reportVerdictBadge.classList.add('click-fix');
+    this.reportVerdictBadge.style.display = 'inline-block';
+  }
+
+  getCurrentTags() {
+    const chips = this.tagsChips.querySelectorAll('.tag-chip');
+    return Array.from(chips).map((c) => c.dataset.tag || c.textContent.trim()).filter(Boolean);
+  }
+
+  renderTagsChips(tags) {
+    const allowed = (tags || []).filter((t) => VERDICT_TAG_LIST.includes(String(t).toLowerCase()));
+    this.tagsChips.innerHTML = allowed
+      .map(
+        (tag) =>
+          `<span class="tag-chip" data-tag="${this.esc(tag)}">${this.esc(tag)} <span class="tag-remove" data-tag="${this.esc(tag)}" aria-label="Remove">×</span></span>`
+      )
+      .join('');
+    this.tagsChips.querySelectorAll('.tag-remove').forEach((el) => {
+      el.addEventListener('click', () => {
+        const t = el.dataset.tag;
+        const newTags = this.getCurrentTags().filter((x) => x !== t);
+        this.renderTagsChips(newTags);
+        this.updateVerdictButtonsState();
+        this.saveNotesAndTags();
+      });
+    });
+  }
+
+  async saveNotesAndTags() {
+    if (!this.currentAnalysisId) return;
+    const notes = this.notesInput.value.trim();
+    const tags = this.getCurrentTags().filter((t) => VERDICT_TAG_LIST.includes(String(t).toLowerCase()));
+    try {
+      const res = await fetch(`/api/analyses/${this.currentAnalysisId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes: notes || null, tags }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      console.log('[ui] Notes/tags saved');
+    } catch (err) {
+      console.error('[ui] Save notes/tags failed:', err);
+      alert('Failed to save: ' + err.message);
+    }
+  }
+
+  /** Copy permalink, Export PDF, VirusTotal check. */
+  initReportActions() {
+    if (this.copyLinkBtn) {
+      this.copyLinkBtn.addEventListener('click', () => {
+        const url = new URL(window.location.href);
+        url.searchParams.set('id', this.currentAnalysisId || '');
+        navigator.clipboard.writeText(url.toString()).then(() => {
+          this.copyLinkBtn.title = 'Copied!';
+          setTimeout(() => { this.copyLinkBtn.title = 'Copy permalink'; }, 2000);
+        });
+      });
+    }
+    if (this.exportPdfBtn) {
+      this.exportPdfBtn.addEventListener('click', () => this.exportReportPdf());
+    }
+    if (this.virustotalBtn) {
+      this.virustotalBtn.addEventListener('click', () => this.checkVirusTotal());
+    }
+    if (this.exportHarBtn) {
+      this.exportHarBtn.addEventListener('click', () => this.exportReportHar());
+    }
+    if (this.exportVideoBtn) {
+      this.exportVideoBtn.addEventListener('click', () => this.exportSessionVideo());
+    }
+  }
+
+  /** Build HAR 1.2 log from current report network requests and trigger download. */
+  exportReportHar() {
+    const requests = this.networkRequests || [];
+    const pageUrl = this.currentAnalysisUrl || this.finalUrl || '';
+    const pageTitle = this.pageTitle || '';
+    const entries = requests.map((r) => {
+      const ts = typeof r.timestamp === 'number' ? r.timestamp : 0;
+      const startDate = new Date(ts);
+      const startedDateTime = startDate.toISOString();
+      const reqHeaders = [];
+      if (r.request_headers && typeof r.request_headers === 'object') {
+        if (Array.isArray(r.request_headers)) {
+          r.request_headers.forEach((h) => { if (h && h.name != null) reqHeaders.push({ name: String(h.name), value: String(h.value ?? '') }); });
+        } else {
+          Object.entries(r.request_headers).forEach(([k, v]) => reqHeaders.push({ name: k, value: String(v ?? '') }));
+        }
+      }
+      const resHeaders = [];
+      if (r.response_headers && typeof r.response_headers === 'object') {
+        if (Array.isArray(r.response_headers)) {
+          r.response_headers.forEach((h) => { if (h && h.name != null) resHeaders.push({ name: String(h.name), value: String(h.value ?? '') }); });
+        } else {
+          Object.entries(r.response_headers).forEach(([k, v]) => resHeaders.push({ name: k, value: String(v ?? '') }));
+        }
+      }
+      const time = (r.timing && typeof r.timing === 'object' && r.timing.receiveHeadersEnd != null && r.timing.sendStart != null)
+        ? Math.round((r.timing.receiveHeadersEnd - r.timing.sendStart) * 1000) : 0;
+      return {
+        startedDateTime,
+        time: Math.max(0, time),
+        request: {
+          method: r.method || 'GET',
+          url: r.url || '',
+          httpVersion: 'HTTP/1.1',
+          headers: reqHeaders.length ? reqHeaders : [{ name: 'Host', value: '' }],
+          queryString: [],
+          cookies: [],
+          headersSize: -1,
+          bodySize: r.request_body ? new Blob([r.request_body]).size : -1,
+          postData: r.request_body ? { mimeType: 'application/octet-stream', text: r.request_body } : undefined,
+        },
+        response: {
+          status: r.status || 0,
+          statusText: r.status_text || '',
+          httpVersion: 'HTTP/1.1',
+          headers: resHeaders.length ? resHeaders : [],
+          cookies: [],
+          content: { size: r.size || r.response_size || 0, mimeType: r.content_type || 'application/octet-stream', text: '' },
+          redirectURL: '',
+          headersSize: -1,
+          bodySize: -1,
+        },
+        cache: {},
+        timings: { send: 0, wait: time, receive: 0 },
+      };
+    });
+    const log = {
+      version: '1.2',
+      creator: { name: 'Carabistouille', version: '1.0' },
+      browser: { name: '', version: '' },
+      pages: pageUrl ? [{ startedDateTime: new Date().toISOString(), id: 'page_1', title: pageTitle || pageUrl, pageTimings: {} }] : [],
+      entries,
+    };
+    const blob = new Blob([JSON.stringify({ log }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `analysis-${(this.currentAnalysisId || 'export').slice(0, 8)}.har`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /** Full-text search across report: on input re-render all panels with global query. */
+  initReportSearch() {
+    if (!this.reportSearchInput) return;
+    this.reportSearchInput.addEventListener('input', () => {
+      this._reportSearchQuery = (this.reportSearchInput.value || '').trim().toLowerCase();
+      this.renderNetworkPanel();
+      this.renderScriptsPanel();
+      this.renderConsolePanel();
+      this.renderRawPanel();
+      if (document.getElementById('panel-session')?.classList.contains('active')) this.renderSessionPanel();
+    });
+  }
+
+  /** Advanced filters: date, risk, has redirects/clipboard/mixed. Applied in renderAnalysesList. */
+  initAdvancedFilters() {
+    const ids = ['filter-date-from', 'filter-date-to', 'filter-risk-min', 'filter-risk-max', 'filter-has-redirects', 'filter-has-clipboard', 'filter-has-mixed'];
+    ids.forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', () => this.loadAnalyses());
+    });
+  }
+
+  /** Screenshot timeline scrubber: slider updates viewport image to selected frame. */
+  initScrubber() {
+    if (!this.screenshotScrubber || !this.scrubberValue) return;
+    this.screenshotScrubber.addEventListener('input', () => {
+      const idx = parseInt(this.screenshotScrubber.value, 10);
+      this._scrubberIndex = idx;
+      const entry = this.screenshotTimeline[idx];
+      if (entry && this.viewportImg) {
+        const mime = entry.data.startsWith('UklG') ? 'image/webp' : 'image/jpeg';
+        this.viewportImg.src = `data:${mime};base64,${entry.data}`;
+        this.viewportPlaceholder.style.display = 'none';
+        this.viewportImg.style.display = 'block';
+      }
+      if (this.scrubberValue) this.scrubberValue.textContent = `${idx + 1} / ${this.screenshotTimeline.length}`;
+    });
+  }
+
+  async checkVirusTotal() {
+    const id = this.currentAnalysisId;
+    if (!id) {
+      alert('No analysis selected.');
+      return;
+    }
+    let apiKey = '';
+    try {
+      apiKey = (localStorage.getItem('virustotal_api_key') || '').trim();
+    } catch (_) {}
+    if (!apiKey) {
+      this.virustotalResult.style.display = 'block';
+      this.virustotalResult.textContent = 'Add your VirusTotal API key in Settings (gear icon), or set VIRUSTOTAL_API_KEY on the server.';
+      return;
+    }
+    this.virustotalResult.style.display = 'block';
+    this.virustotalResult.textContent = 'Checking VirusTotal...';
+    try {
+      const res = await fetch(`/api/analyses/${id}/virustotal`, {
+        headers: { 'X-VirusTotal-API-Key': apiKey },
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = text;
+        try {
+          const j = JSON.parse(text);
+          if (j && typeof j === 'string') msg = j;
+          else if (j && typeof j === 'object') msg = j.error || j.message || text;
+        } catch (_) {}
+        if (res.status === 503 && !text) msg = 'VirusTotal not configured. Set VIRUSTOTAL_API_KEY on the server.';
+        this.virustotalResult.innerHTML = `Error: ${this.esc(msg)}`;
+        return;
+      }
+      const data = await res.json();
+      const malicious = data.malicious ?? 0;
+      const suspicious = data.suspicious ?? 0;
+      const harmless = data.harmless ?? 0;
+      const undetected = data.undetected ?? 0;
+      const total = data.total ?? 0;
+      const reportUrl = data.report_url || '#';
+      const checkedUrl = data.checked_url || '';
+      const dateTs = data.last_analysis_date;
+      const dateStr = dateTs ? new Date(dateTs * 1000).toLocaleString() : '';
+      const parts = [
+        `VirusTotal results for <code class="vt-url">${this.esc(checkedUrl)}</code>`,
+        dateStr ? `Last scanned: ${dateStr}` : '',
+        `<strong>Malicious:</strong> ${malicious} · <strong>Suspicious:</strong> ${suspicious} · <strong>Harmless:</strong> ${harmless} · <strong>Undetected:</strong> ${undetected} (${total} engines)`,
+        reportUrl !== '#' ? `<a href="${this.esc(reportUrl)}" target="_blank" rel="noopener">View full report on VirusTotal</a>` : '',
+      ].filter(Boolean);
+      this.virustotalResult.innerHTML = `<div class="vt-details">${parts.map((p) => `<div>${p}</div>`).join('')}</div>`;
+    } catch (err) {
+      this.virustotalResult.textContent = 'VirusTotal check failed: ' + err.message;
+    }
+  }
+
+  async exportReportPdf() {
+    const { jsPDF } = window.jspdf || {};
+    if (!jsPDF) {
+      alert('PDF library not loaded.');
+      return;
+    }
+    const id = this.currentAnalysisId;
+    const margin = 18;
+    const pageW = 210;
+    const lineHeight = 6;
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    let y = margin;
+
+    const addSection = (title, size = 12) => {
+      if (y > 250) { doc.addPage(); y = margin; }
+      doc.setFontSize(size);
+      doc.setFont(undefined, 'bold');
+      doc.text(title, margin, y);
+      y += lineHeight + 2;
+      doc.setFont(undefined, 'normal');
+    };
+    const addLine = (label, value, wrap = 85) => {
+      if (y > 275) { doc.addPage(); y = margin; }
+      const str = `${label} ${value}`;
+      const lines = doc.splitTextToSize(str, wrap);
+      doc.setFontSize(10);
+      doc.text(lines, margin, y);
+      y += lineHeight * lines.length;
+    };
+
+    doc.setFontSize(20);
+    doc.setFont(undefined, 'bold');
+    doc.text('Carabistouille Report', margin, y);
+    y += lineHeight * 2;
+    doc.setFontSize(9);
+    doc.setFont(undefined, 'normal');
+    doc.text(`Exported on ${new Date().toISOString()}`, margin, y);
+    y += lineHeight * 2;
+
+    const url = this.currentAnalysisUrl || '';
+    const status = this.currentStatus || '';
+    const risk = this.riskScore != null ? this.riskScore : '';
+    const factors = (this.riskFactors || []).join(', ');
+    const notes = this.notesInput ? this.notesInput.value : '';
+    const tags = this.getCurrentTags ? this.getCurrentTags() : [];
+
+    addSection('Summary', 12);
+    addLine('URL:', url);
+    addLine('Final URL:', this.finalUrl || url);
+    addLine('Status:', status);
+    addLine('Risk score:', String(risk));
+    addLine('Risk factors:', factors || '—');
+    addLine('Verdict/Tags:', tags.length ? tags.join(', ') : '—');
+    addLine('Notes:', notes || '—');
+    y += 2;
+
+    addSection('Report details', 11);
+    addLine('Network requests:', String((this.networkRequests || []).length));
+    addLine('Scripts captured:', String((this.scripts || []).length));
+    addLine('Console logs:', String((this.consoleLogs || []).length));
+    addLine('Raw files:', String((this.rawFiles || []).length));
+    addLine('Clipboard reads:', String((this.clipboardReads || []).length));
+    addLine('Detection attempts:', String((this.detectionAttempts || []).length));
+    addLine('Security headers:', String((this.securityHeaders || []).length));
+    addLine('Redirects:', String((this.redirectChain || []).length));
+    if (this.engine) addLine('Engine:', this.engine);
+    if (this.headless != null) addLine('Headless:', String(this.headless));
+    y += 2;
+
+    if (this.redirectChain && this.redirectChain.length > 0) {
+      addSection('Redirect chain', 11);
+      this.redirectChain.forEach((r, i) => {
+        addLine(`${i + 1}.`, r.from || r.to || '', 80);
+      });
+      y += 2;
+    }
+
+    let analysis = null;
+    let screenshotTimeline = [];
+    try {
+      if (id) {
+        const [resAnalysis, resScreenshots] = await Promise.all([
+          fetch(`/api/analyses/${id}`),
+          fetch(`/api/analyses/${id}/screenshots`),
+        ]);
+        if (resAnalysis.ok) analysis = await resAnalysis.json();
+        if (resScreenshots.ok) screenshotTimeline = await resScreenshots.json();
+      }
+    } catch (e) {
+      console.warn('[ui] PDF: could not fetch analysis/screenshots', e);
+    }
+
+    const mainScreenshot = analysis && analysis.screenshot ? analysis.screenshot : null;
+    const maxImgW = pageW - 2 * margin;
+    const maxImgH = 120;
+
+    const toJpegBase64 = (base64, format) => {
+      if (!base64 || format !== 'WEBP') return base64;
+      return new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0);
+          try {
+            resolve(canvas.toDataURL('image/jpeg', 0.85).replace(/^data:image\/jpeg;base64,/, ''));
+          } catch (e) {
+            resolve(base64);
+          }
+        };
+        img.onerror = () => resolve(base64);
+        img.src = `data:image/webp;base64,${base64}`;
+      });
+    };
+    const imgFormat = (base64) => (base64 && base64.startsWith('UklG') ? 'WEBP' : 'JPEG');
+
+    if (mainScreenshot) {
+      if (y > 200) { doc.addPage(); y = margin; }
+      addSection('Screenshot (final)', 11);
+      y += 2;
+      const format = imgFormat(mainScreenshot);
+      const data = format === 'WEBP' ? await toJpegBase64(mainScreenshot, 'WEBP') : mainScreenshot;
+      const useFormat = format === 'WEBP' ? 'JPEG' : format;
+      try {
+        const imgW = maxImgW;
+        const imgH = Math.min(maxImgH, imgW * 0.75);
+        doc.addImage(data, useFormat, margin, y, imgW, imgH);
+        y += imgH + lineHeight;
+      } catch (e) {
+        doc.setFontSize(9);
+        doc.text('(Image could not be embedded)', margin, y);
+        y += lineHeight;
+      }
+      y += 4;
+    }
+
+    const timelineToAdd = (screenshotTimeline && Array.isArray(screenshotTimeline)) ? screenshotTimeline.slice(0, 6) : (this.screenshotTimeline || []).slice(0, 6);
+    if (timelineToAdd.length > 0) {
+      addSection('Screenshot timeline', 11);
+      y += 2;
+      const firstTs = timelineToAdd[0].timestamp;
+      for (let i = 0; i < timelineToAdd.length; i++) {
+        const ss = timelineToAdd[i];
+        if (y > 220) { doc.addPage(); y = margin; }
+        const relSec = ((ss.timestamp - firstTs) / 1000).toFixed(0);
+        doc.setFontSize(9);
+        doc.text(`Screenshot ${i + 1} (+${relSec}s)`, margin, y);
+        y += 4;
+        const format = imgFormat(ss.data);
+        const data = format === 'WEBP' ? await toJpegBase64(ss.data, 'WEBP') : ss.data;
+        const useFormat = format === 'WEBP' ? 'JPEG' : format;
+        try {
+          const imgW = maxImgW;
+          const imgH = Math.min(60, imgW * 0.6);
+          doc.addImage(data, useFormat, margin, y, imgW, imgH);
+          y += imgH + 6;
+        } catch (e) {
+          doc.text('(Image not embedded)', margin, y);
+          y += lineHeight + 4;
+        }
+      }
+      y += 4;
+    }
+
+    const name = `carabistouille-report-${id ? id.slice(0, 8) : 'export'}.pdf`;
+    doc.save(name);
+  }
+
+  /** Tag filter in sidebar: collect all tags from analyses, filter list by selected tag. */
+  initTagFilter() {
+    // Tag filter chips are populated when we render the list; clicking a chip filters the list.
+    this._selectedTagFilter = null;
   }
 
   /**
@@ -72,6 +646,7 @@ class App {
     this.renderScreenshotsPanel();
     this.renderSecurityPanel();
     this.renderDetectionPanel();
+    this.renderSessionPanel();
   }
 
   /** Update agent status label (connected / disconnected) using current language. */
@@ -109,6 +684,38 @@ class App {
     this.riskScoreEl = document.getElementById('risk-score');
     this.agentModeEl = document.getElementById('agent-mode');
     this.agentEngineEl = document.getElementById('agent-engine');
+    this.settingsBtn = document.getElementById('settings-btn');
+    this.settingsModal = document.getElementById('settings-modal');
+    this.settingsClose = document.getElementById('settings-close');
+    this.virustotalKeyInput = document.getElementById('virustotal-key-input');
+    this.geoLocaleRow = document.getElementById('geo-locale-row');
+    this.geoToggle = document.getElementById('geo-toggle');
+    this.timezoneInput = document.getElementById('timezone-input');
+    this.localeInput = document.getElementById('locale-input');
+    this.latitudeInput = document.getElementById('latitude-input');
+    this.longitudeInput = document.getElementById('longitude-input');
+    this.copyLinkBtn = document.getElementById('copy-link-btn');
+    this.exportPdfBtn = document.getElementById('export-pdf-btn');
+    this.virustotalBtn = document.getElementById('virustotal-btn');
+    this.exportHarBtn = document.getElementById('export-har-btn');
+    this.exportVideoBtn = document.getElementById('export-video-btn');
+    this.reportSearchInput = document.getElementById('report-search-input');
+    this.reportSearchRow = document.getElementById('report-search-row');
+    this.screenshotScrubber = document.getElementById('screenshot-scrubber');
+    this.scrubberValue = document.getElementById('scrubber-value');
+    this.scrubberRow = document.getElementById('screenshot-scrubber-row');
+    this.notesTagsSection = document.getElementById('notes-tags-section');
+    this.notesInput = document.getElementById('notes-input');
+    this.tagsChips = document.getElementById('tags-chips');
+    this.saveNotesTagsBtn = document.getElementById('save-notes-tags-btn');
+    this.virustotalResult = document.getElementById('virustotal-result');
+    this.tagFilter = document.getElementById('tag-filter');
+    this.tagFilterChips = document.getElementById('tag-filter-chips');
+    this.reportLoading = document.getElementById('report-loading');
+    this.reportVerdictBadge = document.getElementById('report-verdict-badge');
+    this.verdictSubtypeRow = document.getElementById('verdict-subtype-row');
+    this.reportRunOptions = document.getElementById('report-run-options');
+    this.reportRunOptionsBody = document.getElementById('report-run-options-body');
   }
 
   /** Form submit, tool buttons, stop, proxy toggle, tab clicks, search inputs, viewport click/scroll/mousemove, keyboard, resizer. */
@@ -156,6 +763,9 @@ class App {
         document.getElementById(`panel-${tab.dataset.tab}`).classList.add('active');
         if (tab.dataset.tab === 'screenshots' && this.screenshotTimeline.length === 0 && this.screenshotTimelineCount > 0) {
           this.loadScreenshotTimeline();
+        }
+        if (tab.dataset.tab === 'session') {
+          this.renderSessionPanel();
         }
       });
     });
@@ -235,8 +845,11 @@ class App {
    */
   getViewportCoords(e) {
     const rect = this.viewportImg.getBoundingClientRect();
-    const scaleX = this.viewportImg.naturalWidth / rect.width;
-    const scaleY = this.viewportImg.naturalHeight / rect.height;
+    const nw = this.viewportImg.naturalWidth;
+    const nh = this.viewportImg.naturalHeight;
+    if (!nw || !nh || !rect.width || !rect.height) return null;
+    const scaleX = nw / rect.width;
+    const scaleY = nh / rect.height;
     return {
       x: (e.clientX - rect.left) * scaleX,
       y: (e.clientY - rect.top) * scaleY,
@@ -247,7 +860,9 @@ class App {
   /** Handle click on viewport: interact (send click) or inspect (request element at coords). */
   handleViewportClick(e) {
     if (!this.ws) return;
-    const { x, y } = this.getViewportCoords(e);
+    const coords = this.getViewportCoords(e);
+    if (!coords) return;
+    const { x, y } = coords;
     console.log(`[ui] Viewport click at (${x.toFixed(0)}, ${y.toFixed(0)}) tool=${this.activeTool}`);
 
     if (this.activeTool === 'inspect') {
@@ -274,8 +889,9 @@ class App {
     if (now - this.lastMouseMoveTime < 100) return;
     this.lastMouseMoveTime = now;
 
-    const { x, y } = this.getViewportCoords(e);
-    this.wsSend({ type: 'mousemove', x, y });
+    const coords = this.getViewportCoords(e);
+    if (!coords) return;
+    this.wsSend({ type: 'mousemove', x: coords.x, y: coords.y });
   }
 
   /** POST /api/analyses with url (and optional proxy), then select the new analysis and connect viewer WS. */
@@ -295,6 +911,28 @@ class App {
       const body = { url };
       if (proxy) body.proxy = proxy;
       if (userAgent) body.user_agent = userAgent;
+      if (this.geoLocaleRow && this.geoLocaleRow.style.display !== 'none') {
+        const tz = this.timezoneInput?.value?.trim();
+        const loc = this.localeInput?.value?.trim();
+        const lat = this.latitudeInput?.value ? parseFloat(this.latitudeInput.value) : undefined;
+        const lng = this.longitudeInput?.value ? parseFloat(this.longitudeInput.value) : undefined;
+        if (tz) body.timezone_id = tz;
+        if (loc) body.locale = loc;
+        if (typeof lat === 'number' && !Number.isNaN(lat)) body.latitude = lat;
+        if (typeof lng === 'number' && !Number.isNaN(lng)) body.longitude = lng;
+      }
+      const viewportPreset = document.getElementById('viewport-preset')?.value;
+      if (viewportPreset) {
+        const [w, h, scale, isMobile] = viewportPreset.split(',');
+        if (w && h) {
+          body.viewport_width = parseInt(w, 10);
+          body.viewport_height = parseInt(h, 10);
+          if (scale) body.device_scale_factor = parseFloat(scale) || 1;
+          body.is_mobile = isMobile === 'true';
+        }
+      }
+      const networkThrottle = document.getElementById('network-throttle')?.value?.trim();
+      if (networkThrottle) body.network_throttling = networkThrottle;
       const res = await fetch('/api/analyses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -322,22 +960,38 @@ class App {
     }
   }
 
-  /** POST /api/analyses/:id/stop to request analysis finish. */
+  /** POST /api/analyses/:id/stop to request analysis finish. Spinner stays until analysis_complete or error. */
   /** POST /api/stop for current analysis and disconnect viewer. */
   async stopAnalysis() {
     if (!this.currentAnalysisId) return;
 
+    const defaultContent = this.stopBtn.querySelector('.stop-btn-default');
+    const loadingContent = this.stopBtn.querySelector('.stop-btn-loading');
+    if (defaultContent) defaultContent.style.display = 'none';
+    if (loadingContent) loadingContent.style.display = 'inline-flex';
     this.stopBtn.disabled = true;
+
     try {
       this.wsSend({ type: 'stop_analysis' });
       const res = await fetch(`/api/analyses/${this.currentAnalysisId}/stop`, { method: 'POST' });
       if (!res.ok) {
         const text = await res.text();
         console.warn(`[ui] Stop failed: ${res.status} ${text}`);
+        this._resetFinishButtonContent(defaultContent, loadingContent);
+        this.stopBtn.disabled = false;
       }
+      // On success, keep spinner until we receive analysis_complete (handled in updateStopButton).
     } catch (err) {
       console.error('[ui] Stop error:', err);
+      this._resetFinishButtonContent(defaultContent, loadingContent);
+      this.stopBtn.disabled = false;
     }
+  }
+
+  /** Restore Finish button to default label (hide spinner). */
+  _resetFinishButtonContent(defaultContent, loadingContent) {
+    if (defaultContent) defaultContent.style.display = '';
+    if (loadingContent) loadingContent.style.display = 'none';
   }
 
   /** Fetch GET /api/analyses and render the sidebar list; update selected item. */
@@ -353,21 +1007,67 @@ class App {
   }
 
   /**
-   * Render the analyses list in the sidebar (URL, status, select).
-   * @param {Array<{ id: string, url: string, status: string }>} analyses - List from API.
+   * Render the analyses list in the sidebar (URL, status, tags, select). Filter by selected tag if set.
+   * @param {Array<{ id: string, url: string, status: string, tags?: string[] }>} analyses - List from API.
    */
   renderAnalysesList(analyses) {
-    this.analysesList.innerHTML = analyses
+    let list = analyses || [];
+    const dateFrom = document.getElementById('filter-date-from')?.value;
+    const dateTo = document.getElementById('filter-date-to')?.value;
+    const riskMin = document.getElementById('filter-risk-min')?.value;
+    const riskMax = document.getElementById('filter-risk-max')?.value;
+    const hasRedirects = document.getElementById('filter-has-redirects')?.checked;
+    const hasClipboard = document.getElementById('filter-has-clipboard')?.checked;
+    const hasMixed = document.getElementById('filter-has-mixed')?.checked;
+    if (dateFrom) list = list.filter((a) => (a.created_at || '').slice(0, 10) >= dateFrom);
+    if (dateTo) list = list.filter((a) => (a.created_at || '').slice(0, 10) <= dateTo);
+    if (riskMin !== undefined && riskMin !== '') {
+      const min = parseInt(riskMin, 10);
+      if (!isNaN(min)) list = list.filter((a) => (a.report?.risk_score ?? 0) >= min);
+    }
+    if (riskMax !== undefined && riskMax !== '') {
+      const max = parseInt(riskMax, 10);
+      if (!isNaN(max)) list = list.filter((a) => (a.report?.risk_score ?? 0) <= max);
+    }
+    if (hasRedirects) list = list.filter((a) => (a.report?.redirect_chain?.length || 0) > 0);
+    if (hasClipboard) list = list.filter((a) => (a.report?.clipboard_reads?.length || 0) > 0);
+    if (hasMixed) list = list.filter((a) => a.report?.security?.has_mixed_content === true);
+
+    const allTags = [...new Set(list.flatMap((a) => (a.tags || []).filter((t) => VERDICT_TAG_LIST.includes(String(t).toLowerCase()))))].sort();
+    if (this.tagFilter && this.tagFilterChips) {
+      this.tagFilter.style.display = allTags.length ? 'block' : 'none';
+      this.tagFilterChips.innerHTML = allTags
+        .map(
+          (tag) =>
+            `<button type="button" class="tag-filter-chip ${this._selectedTagFilter === tag ? 'active' : ''}" data-tag="${this.esc(tag)}">${this.esc(tag)}</button>`
+        )
+        .join('');
+      this.tagFilterChips.querySelectorAll('.tag-filter-chip').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          this._selectedTagFilter = this._selectedTagFilter === btn.dataset.tag ? null : btn.dataset.tag;
+          this.loadAnalyses();
+        });
+      });
+    }
+
+    const filtered = this._selectedTagFilter
+      ? list.filter((a) => (a.tags || []).includes(this._selectedTagFilter))
+      : list;
+
+    this.analysesList.innerHTML = filtered
       .map((a) => {
         const isActive = a.id === this.currentAnalysisId;
         const time = new Date(a.created_at).toLocaleTimeString();
         let displayUrl;
         try { displayUrl = new URL(a.url).hostname; } catch { displayUrl = a.url; }
+        const verdictLabel = getVerdictLabel(a.tags || []);
+        const verdictClass = verdictLabel === 'False positive' ? 'false-positive' : 'malicious';
         return `
         <div class="analysis-card ${isActive ? 'active' : ''}" data-id="${a.id}">
           <div class="analysis-url" title="${this.esc(a.url)}">${this.esc(displayUrl)}</div>
           <div class="analysis-meta">
             <span class="analysis-status ${a.status}">${a.status}</span>
+            ${verdictLabel ? `<span class="verdict-badge ${verdictClass}">${this.esc(verdictLabel)}</span>` : ''}
             <span>${time}</span>
           </div>
         </div>`;
@@ -389,9 +1089,13 @@ class App {
 
     this.currentAnalysisId = id;
     this.currentStatus = null;
+    const url = new URL(window.location.href);
+    url.searchParams.set('id', id);
+    window.history.replaceState({}, '', url);
     this.screenshotCount = 0;
     this.wsEventCount = 0;
     this.resetReportPanels();
+    if (this.reportLoading) this.reportLoading.style.display = 'flex';
     this.loadAnalyses();
     this.loadAnalysisReport(id);
     this.connectViewer(id);
@@ -400,9 +1104,17 @@ class App {
   /** Show/hide Finish button based on status (pending | running vs complete | error). */
   /** Show/hide and enable/disable stop button based on analysis status (running vs not). */
   updateStopButton(status) {
-    this.currentStatus = status;
-    const active = status === 'pending' || status === 'running';
-    this.stopBtn.style.display = active ? 'inline-flex' : 'none';
+    if (!this.stopBtn) return;
+    const s = String(status ?? '').toLowerCase();
+    this.currentStatus = s || status;
+
+    const defaultContent = this.stopBtn.querySelector('.stop-btn-default');
+    const loadingContent = this.stopBtn.querySelector('.stop-btn-loading');
+    const isActive = s === 'pending' || s === 'running';
+    if (!isActive) {
+      this._resetFinishButtonContent(defaultContent, loadingContent);
+    }
+    this.stopBtn.style.display = isActive ? 'inline-flex' : 'none';
     this.stopBtn.disabled = false;
   }
 
@@ -422,9 +1134,11 @@ class App {
     this.pageSource = null;
     this.domSnapshot = null;
     this.storageCapture = null;
+    this.phishingIndicators = [];
     this.securityHeaders = [];
     this.redirectChain = [];
     this.finalUrl = null;
+    this.pageTitle = null;
     this.screenshotTimeline = [];
     this.screenshotTimelineCount = 0;
     document.getElementById('search-network').value = '';
@@ -445,9 +1159,49 @@ class App {
     this.stopBtn.style.display = 'none';
     this.pageUrl.textContent = '';
     this.inspectHighlight.style.display = 'none';
+    if (this.notesTagsSection) this.notesTagsSection.style.display = 'none';
+    if (this.copyLinkBtn) this.copyLinkBtn.style.display = 'none';
+    if (this.exportPdfBtn) this.exportPdfBtn.style.display = 'none';
+    if (this.virustotalBtn) this.virustotalBtn.style.display = 'none';
+    if (this.exportHarBtn) this.exportHarBtn.style.display = 'none';
+    if (this.exportVideoBtn) this.exportVideoBtn.style.display = 'none';
+    if (this.reportSearchRow) this.reportSearchRow.style.display = 'none';
+    if (this.reportSearchInput) this.reportSearchInput.value = '';
+    if (this.scrubberRow) this.scrubberRow.style.display = 'none';
+    if (this.virustotalResult) this.virustotalResult.style.display = 'none';
+    if (this.reportRunOptions) this.reportRunOptions.style.display = 'none';
+    if (this.reportVerdictBadge) this.reportVerdictBadge.style.display = 'none';
     this.elementInspector.style.display = 'none';
     this.viewportImg.style.display = 'none';
     this.viewportPlaceholder.style.display = 'flex';
+  }
+
+  /** Render "Options used for this analysis" from run_options (proxy, viewport, network, geo, etc.). */
+  renderRunOptions(runOptions) {
+    if (!this.reportRunOptions || !this.reportRunOptionsBody) return;
+    const o = runOptions || {};
+    const rows = [];
+    const push = (label, value) => {
+      if (value != null && value !== '') rows.push({ label, value: String(value) });
+    };
+    push('Proxy', o.proxy);
+    push('User agent', o.user_agent ? (o.user_agent.length > 60 ? o.user_agent.slice(0, 60) + '…' : o.user_agent) : null);
+    push('Viewport', (o.viewport_width && o.viewport_height) ? `${o.viewport_width}×${o.viewport_height}` : null);
+    push('Device scale', o.device_scale_factor);
+    push('Mobile', o.is_mobile === true ? 'Yes' : (o.is_mobile === false ? 'No' : null));
+    push('Network throttling', o.network_throttling);
+    push('Timezone', o.timezone_id);
+    push('Locale', o.locale);
+    push('Latitude', o.latitude);
+    push('Longitude', o.longitude);
+    if (rows.length === 0) {
+      this.reportRunOptions.style.display = 'none';
+      return;
+    }
+    this.reportRunOptionsBody.innerHTML = rows
+      .map((r) => `<span class="run-opt-label">${this.esc(r.label)}</span><span class="run-opt-value">${this.esc(r.value)}</span>`)
+      .join('');
+    this.reportRunOptions.style.display = 'block';
   }
 
   /** Fetch GET /api/analyses/:id and populate report panels and viewport screenshot for completed analyses. */
@@ -462,10 +1216,27 @@ class App {
       console.log(`[ui] Loaded analysis: status=${analysis.status}`);
 
       this.pageUrl.textContent = analysis.url;
+      this.currentAnalysisUrl = analysis.url;
 
-      if (analysis.status === 'pending' || analysis.status === 'running') {
-        this.updateStopButton(analysis.status);
+      if (this.notesTagsSection) {
+        this.notesTagsSection.style.display = 'block';
+        this.notesInput.value = analysis.notes || '';
+        this.renderTagsChips(analysis.tags || []);
+        this.updateVerdictButtonsState();
       }
+      if (this.copyLinkBtn) this.copyLinkBtn.style.display = 'inline-block';
+      if (this.exportPdfBtn) this.exportPdfBtn.style.display = 'inline-block';
+      if (this.virustotalBtn) this.virustotalBtn.style.display = 'inline-block';
+      if (this.exportHarBtn) this.exportHarBtn.style.display = 'inline-block';
+      if (this.exportVideoBtn) this.exportVideoBtn.style.display = this.screenshotTimeline?.length > 0 ? 'inline-block' : 'none';
+      if (this.reportSearchRow) this.reportSearchRow.style.display = 'flex';
+      if (this.reportSearchInput) this.reportSearchInput.value = '';
+      this._reportSearchQuery = '';
+      if (this.virustotalResult) this.virustotalResult.style.display = 'none';
+      this.renderRunOptions(analysis.run_options);
+
+      // Always sync button visibility (hide for complete/error, show for pending/running).
+      this.updateStopButton(analysis.status);
 
       // Show the last screenshot for completed/error analyses
       if (analysis.screenshot && (analysis.status === 'complete' || analysis.status === 'error')) {
@@ -484,6 +1255,7 @@ class App {
         this.security = r.security || null;
         this.riskScore = r.risk_score;
         this.riskFactors = r.risk_factors || [];
+        this.phishingIndicators = r.phishing_indicators || [];
         this.clipboardReads = r.clipboard_reads || [];
         this.detectionAttempts = r.detection_attempts || [];
         this.rawFiles = r.raw_files || [];
@@ -493,6 +1265,7 @@ class App {
         this.securityHeaders = r.security_headers || [];
         this.redirectChain = r.redirect_chain || [];
         this.finalUrl = r.final_url || null;
+        this.pageTitle = r.page_title || null;
         this.engine = r.engine || null;
         this.headless = r.headless ?? null;
 
@@ -511,6 +1284,7 @@ class App {
         this.renderRawPanel();
         this.renderSecurityPanel();
         this.renderDetectionPanel();
+        this.renderSessionPanel();
         this.updateEngineBadge();
         this.updateRiskBadge();
         this.updateAgentHeaderInfo();
@@ -521,6 +1295,8 @@ class App {
       }
     } catch (err) {
       console.error('[ui] Failed to load analysis:', err);
+    } finally {
+      if (this.reportLoading) this.reportLoading.style.display = 'none';
     }
   }
 
@@ -673,6 +1449,7 @@ class App {
           if (r.page_source) this.pageSource = r.page_source;
           if (r.dom_snapshot) this.domSnapshot = r.dom_snapshot;
           if (r.storage_capture) this.storageCapture = r.storage_capture;
+          if (r.phishing_indicators?.length) this.phishingIndicators = r.phishing_indicators;
           if (r.security_headers?.length) this.securityHeaders = r.security_headers;
           if (r.redirect_chain?.length) this.redirectChain = r.redirect_chain;
           if (r.final_url) this.finalUrl = r.final_url;
@@ -699,7 +1476,7 @@ class App {
         if (event.headless !== undefined) this.headless = event.headless;
         this.updateEngineBadge();
         this.updateAgentHeaderInfo();
-        if (event.status === 'pending' || event.status === 'running') {
+        if (event.status) {
           this.updateStopButton(event.status);
         }
         break;
@@ -738,6 +1515,7 @@ class App {
           if (event.report.page_source) this.pageSource = event.report.page_source;
           if (event.report.dom_snapshot) this.domSnapshot = event.report.dom_snapshot;
           if (event.report.storage_capture) this.storageCapture = event.report.storage_capture;
+          if (event.report.phishing_indicators?.length) this.phishingIndicators = event.report.phishing_indicators;
           if (event.report.security_headers?.length) this.securityHeaders = event.report.security_headers;
           if (event.report.redirect_chain?.length) this.redirectChain = event.report.redirect_chain;
           if (event.report.final_url) this.finalUrl = event.report.final_url;
@@ -871,10 +1649,20 @@ class App {
     }
 
     const query = (document.getElementById('search-network')?.value || '').toLowerCase();
+    const globalQ = this._reportSearchQuery || '';
     const typeFilter = this._activeNetTypeFilter || 'all';
     const knownTypes = ['document','script','stylesheet','xhr','fetch','image','font','media','websocket','manifest','ping','preflight','other'];
 
     let filtered = this.networkRequests;
+    if (globalQ) {
+      filtered = filtered.filter(r =>
+        (r.url || '').toLowerCase().includes(globalQ) ||
+        (r.method || '').toLowerCase().includes(globalQ) ||
+        (r.content_type || '').toLowerCase().includes(globalQ) ||
+        (r.resource_type || '').toLowerCase().includes(globalQ) ||
+        (r.request_body || '').toLowerCase().includes(globalQ) ||
+        (JSON.stringify(r.request_headers || {}) + JSON.stringify(r.response_headers || {})).toLowerCase().includes(globalQ));
+    }
     if (typeFilter !== 'all') {
       const types = typeFilter.split(',');
       filtered = filtered.filter(r => {
@@ -884,12 +1672,13 @@ class App {
         return false;
       });
     }
-    if (query) {
+    const searchQ = query || globalQ;
+    if (searchQ) {
       filtered = filtered.filter(r =>
-        r.url.toLowerCase().includes(query) ||
-        (r.content_type || '').toLowerCase().includes(query) ||
-        r.method.toLowerCase().includes(query) ||
-        (r.resource_type || '').toLowerCase().includes(query)
+        (r.url || '').toLowerCase().includes(searchQ) ||
+        (r.content_type || '').toLowerCase().includes(searchQ) ||
+        (r.method || '').toLowerCase().includes(searchQ) ||
+        (r.resource_type || '').toLowerCase().includes(searchQ)
       );
     }
 
@@ -1190,11 +1979,13 @@ class App {
     }
 
     const query = (document.getElementById('search-scripts')?.value || '').toLowerCase();
-    const filtered = query
+    const globalQ = this._reportSearchQuery || '';
+    const searchQ = query || globalQ;
+    const filtered = searchQ
       ? this.scripts.filter(s =>
-          (s.url || '').toLowerCase().includes(query) ||
-          (s.is_inline && 'inline'.includes(query)) ||
-          (s.content || '').toLowerCase().includes(query))
+          (s.url || '').toLowerCase().includes(searchQ) ||
+          (s.is_inline && 'inline'.includes(searchQ)) ||
+          (s.content || '').toLowerCase().includes(searchQ))
       : this.scripts;
 
     list.innerHTML = filtered
@@ -1306,8 +2097,10 @@ class App {
     }
 
     const query = (document.getElementById('search-console')?.value || '').toLowerCase();
-    const filtered = query
-      ? this.consoleLogs.filter(l => l.text.toLowerCase().includes(query) || l.level.toLowerCase().includes(query))
+    const globalQ = this._reportSearchQuery || '';
+    const searchQ = query || globalQ;
+    const filtered = searchQ
+      ? this.consoleLogs.filter(l => (l.text || '').toLowerCase().includes(searchQ) || (l.level || '').toLowerCase().includes(searchQ))
       : this.consoleLogs;
 
     list.innerHTML = filtered
@@ -1337,6 +2130,8 @@ class App {
     }
 
     const query = (document.getElementById('search-raw')?.value || '').toLowerCase();
+    const globalQ = this._reportSearchQuery || '';
+    const searchQ = query || globalQ;
     const selectedExts = this.getRawExtensionFilters();
 
     const matchExtension = (url, contentType, ext) => {
@@ -1357,7 +2152,7 @@ class App {
 
     // Page Source pinned entry (counts as HTML)
     let pageSourceHtml = '';
-    if (this.pageSource && showByExtension('html') && (!query || 'page source'.includes(query) || 'html'.includes(query))) {
+    if (this.pageSource && showByExtension('html') && (!searchQ || 'page source'.includes(searchQ) || 'html'.includes(searchQ))) {
       const preview = this.pageSource.trim().substring(0, 150);
       const sizeKb = (this.pageSource.length / 1024).toFixed(1);
       pageSourceHtml = `
@@ -1388,7 +2183,7 @@ class App {
 
     // DOM snapshot (at finish) pinned entry (counts as HTML)
     let domSnapshotHtml = '';
-    if (this.domSnapshot && showByExtension('html') && (!query || 'dom snapshot'.includes(query) || 'html'.includes(query))) {
+    if (this.domSnapshot && showByExtension('html') && (!searchQ || 'dom snapshot'.includes(searchQ) || 'html'.includes(searchQ))) {
       const preview = this.domSnapshot.trim().substring(0, 150);
       const sizeKb = (this.domSnapshot.length / 1024).toFixed(1);
       domSnapshotHtml = `
@@ -1415,8 +2210,8 @@ class App {
     if (selectedExts.length) {
       filtered = filtered.filter(f => selectedExts.some(ext => matchExtension(f.url, f.content_type, ext)));
     }
-    if (query) {
-      filtered = filtered.filter(f => f.url.toLowerCase().includes(query) || (f.content_type || '').toLowerCase().includes(query));
+    if (searchQ) {
+      filtered = filtered.filter(f => (f.url || '').toLowerCase().includes(searchQ) || (f.content_type || '').toLowerCase().includes(searchQ) || (f.content || '').toLowerCase().includes(searchQ));
     }
 
     list.innerHTML = pageSourceHtml + domSnapshotHtml + filtered
@@ -1568,6 +2363,57 @@ class App {
     });
   }
 
+  /** Build chronological session events from redirects, network, console, scripts. */
+  buildSessionEvents() {
+    const events = [];
+    (this.redirectChain || []).forEach((r, i) => {
+      events.push({ type: 'redirect', timestamp: this.analysisStartTime || 0, summary: `${r.from || ''} → ${r.to || ''} (${r.status || ''})`, detail: r });
+    });
+    (this.networkRequests || []).forEach((r) => {
+      events.push({ type: 'request', timestamp: r.timestamp || 0, summary: `${r.method || 'GET'} ${(r.url || '').slice(0, 80)}${(r.url || '').length > 80 ? '…' : ''}`, detail: r });
+    });
+    (this.consoleLogs || []).forEach((l) => {
+      events.push({ type: 'console', timestamp: l.timestamp || 0, summary: `[${l.level || 'log'}] ${(l.text || '').slice(0, 100)}${(l.text || '').length > 100 ? '…' : ''}`, detail: l });
+    });
+    (this.scripts || []).forEach((s) => {
+      const url = s.url || '(inline)';
+      events.push({ type: 'script', timestamp: s.timestamp || 0, summary: url.slice(0, 80) + (url.length > 80 ? '…' : ''), detail: s });
+    });
+    events.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    return events;
+  }
+
+  /** Render Session tab: chronological event log (redirects, requests, console, scripts). */
+  renderSessionPanel() {
+    const list = document.getElementById('panel-session-list');
+    const countEl = document.getElementById('count-session');
+    const events = this.buildSessionEvents();
+    if (countEl) countEl.textContent = events.length;
+
+    const globalQ = this._reportSearchQuery || '';
+    const filtered = globalQ
+      ? events.filter((e) => (e.summary || '').toLowerCase().includes(globalQ))
+      : events;
+
+    if (filtered.length === 0) {
+      list.innerHTML = '<div class="panel-empty">' + (events.length === 0 ? this.t('app.noSession') : 'No matching session events.') + '</div>';
+      return;
+    }
+    const startTs = this.analysisStartTime || 0;
+    list.innerHTML = filtered
+      .map((e) => {
+        const rel = e.timestamp && startTs ? ((e.timestamp - startTs) / 1000).toFixed(1) + 's' : '';
+        const abs = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
+        const icon = e.type === 'redirect' ? '↪' : e.type === 'request' ? '↵' : e.type === 'console' ? '☰' : '◉';
+        return `<div class="session-event ${e.type}" title="${this.esc(e.summary)}">
+          <span class="session-event-icon">${icon}</span>
+          <span class="session-event-time">${abs} ${rel ? `+${rel}` : ''}</span>
+          <span class="session-event-body">${this.esc(e.summary)}</span>
+        </div>`;
+      })
+      .join('');
+  }
+
   /** Fetch GET /api/analyses/:id/screenshots and render the screenshot gallery. */
   async loadScreenshotTimeline() {
     if (!this.currentAnalysisId) return;
@@ -1577,9 +2423,71 @@ class App {
       this.screenshotTimeline = await res.json();
       document.getElementById('count-screenshots').textContent = this.screenshotTimeline.length;
       this.renderScreenshotsPanel();
+      if (this.exportVideoBtn && this.screenshotTimeline.length > 0) this.exportVideoBtn.style.display = 'inline-block';
     } catch (err) {
       console.error('[ui] Failed to load screenshot timeline:', err);
     }
+  }
+
+  /** Export session as WebM video from screenshot timeline. Uses canvas + MediaRecorder; frames shown at original timestamps. */
+  async exportSessionVideo() {
+    if (!this.screenshotTimeline?.length) {
+      await this.loadScreenshotTimeline();
+      if (!this.screenshotTimeline?.length) {
+        alert('No screenshots in timeline to export as video.');
+        return;
+      }
+    }
+    const timeline = this.screenshotTimeline;
+    const firstTs = timeline[0].timestamp;
+    const fps = 4;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const img = new Image();
+    const loadImage = (src) => new Promise((resolve, reject) => {
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+    const mime = timeline[0].data.startsWith('UklG') ? 'image/webp' : 'image/jpeg';
+    await loadImage(`data:${mime};base64,${timeline[0].data}`);
+    canvas.width = img.naturalWidth || img.width;
+    canvas.height = img.naturalHeight || img.height;
+    const stream = canvas.captureStream(fps);
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm';
+    const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 1000000 });
+    const chunks = [];
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: 'video/webm' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `session-${(this.currentAnalysisId || 'export').slice(0, 8)}.webm`;
+      a.click();
+      URL.revokeObjectURL(url);
+    };
+    recorder.start(500);
+    const drawFrame = (index) => {
+      if (index >= timeline.length) {
+        setTimeout(() => recorder.stop(), 500);
+        return;
+      }
+      const entry = timeline[index];
+      const src = `data:${entry.data.startsWith('UklG') ? 'image/webp' : 'image/jpeg'};base64,${entry.data}`;
+      const nextImg = new Image();
+      nextImg.onload = () => {
+        ctx.drawImage(nextImg, 0, 0, canvas.width, canvas.height);
+        const nextIndex = index + 1;
+        const delay = nextIndex < timeline.length ? Math.max(0, (timeline[nextIndex].timestamp - entry.timestamp)) : 0;
+        setTimeout(() => drawFrame(nextIndex), delay);
+      };
+      nextImg.onerror = () => drawFrame(index + 1);
+      nextImg.src = src;
+    };
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const delay0 = timeline.length > 1 ? Math.max(0, timeline[1].timestamp - firstTs) : 0;
+    setTimeout(() => drawFrame(1), delay0);
   }
 
   /** Render Screenshots tab: thumbnails with timestamps; click opens modal with prev/next and download. */
@@ -1597,6 +2505,16 @@ class App {
         list.querySelector('.ss-load-prompt').addEventListener('click', () => this.loadScreenshotTimeline());
       }
       return;
+    }
+
+    if (this.scrubberRow) {
+      this.scrubberRow.style.display = 'flex';
+      if (this.screenshotScrubber) {
+        this.screenshotScrubber.min = 0;
+        this.screenshotScrubber.max = Math.max(0, this.screenshotTimeline.length - 1);
+        this.screenshotScrubber.value = this._scrubberIndex = 0;
+      }
+      if (this.scrubberValue) this.scrubberValue.textContent = `1 / ${this.screenshotTimeline.length}`;
     }
 
     const firstTs = this.screenshotTimeline[0].timestamp;
@@ -1619,10 +2537,21 @@ class App {
     });
   }
 
-  /** Open screenshot modal at given index; wire prev/next and keyboard. */
+  /** Open screenshot modal at given index; wire prev/next and keyboard. Syncs scrubber and viewport. */
   _showScreenshotModal(idx) {
     const ss = this.screenshotTimeline[idx];
     if (!ss) return;
+    this._scrubberIndex = idx;
+    if (this.screenshotScrubber) {
+      this.screenshotScrubber.value = idx;
+      const mime = ss.data.startsWith('UklG') ? 'image/webp' : 'image/jpeg';
+      if (this.viewportImg) {
+        this.viewportImg.src = `data:${mime};base64,${ss.data}`;
+        this.viewportPlaceholder.style.display = 'none';
+        this.viewportImg.style.display = 'block';
+      }
+    }
+    if (this.scrubberValue) this.scrubberValue.textContent = `${idx + 1} / ${this.screenshotTimeline.length}`;
 
     let modal = document.getElementById('ss-modal');
     if (!modal) {
@@ -1791,10 +2720,19 @@ class App {
       html += '</div>';
     }
 
+    // Phishing kit / template indicators
+    if (this.phishingIndicators && this.phishingIndicators.length > 0) {
+      html += '<div class="security-subsection"><h3 class="clipboard-heading">Phishing indicators</h3>';
+      this.phishingIndicators.forEach((ind) => {
+        html += `<div class="security-item phishing-indicator">${this.esc(ind)}</div>`;
+      });
+      html += '</div>';
+    }
+
     // Cookies & storage
     if (this.storageCapture) {
       const sens = (s) => /session|token|auth|csrf|sid|jwt|refresh|access_token|oauth|credential/i.test(s || '');
-      html += '<div class="security-subsection"><h3 class="clipboard-heading">Cookies & storage</h3>';
+      html += '<div class="security-subsection"><div class="storage-section-header"><h3 class="clipboard-heading">Cookies & storage</h3><button type="button" class="icon-btn storage-export-btn" title="Export cookies and storage as JSON">Export</button></div>';
       if (this.storageCapture.cookies?.length > 0) {
         html += '<div class="storage-group"><strong>Cookies</strong> (' + this.storageCapture.cookies.length + ')</div>';
         this.storageCapture.cookies.forEach((c) => {
@@ -1857,6 +2795,25 @@ class App {
     }
 
     panel.innerHTML = html;
+
+    panel.querySelectorAll('.storage-export-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!this.storageCapture) return;
+        const payload = {
+          exported_at: new Date().toISOString(),
+          analysis_id: this.currentAnalysisId || null,
+          cookies: this.storageCapture.cookies || [],
+          local_storage: this.storageCapture.local_storage || [],
+          session_storage: this.storageCapture.session_storage || [],
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `carabistouille-storage-${this.currentAnalysisId || 'export'}.json`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+      });
+    });
 
     panel.querySelectorAll('.clipboard-copy-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {

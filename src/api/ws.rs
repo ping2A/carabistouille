@@ -101,10 +101,12 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 data.len() / 1024
             );
             let now_ms = chrono::Utc::now().timestamp_millis() as f64;
+            let mut did_start = false;
             let should_forward = if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
                 analysis.screenshot = Some(data.clone());
                 if analysis.status == AnalysisStatus::Pending {
                     analysis.status = AnalysisStatus::Running;
+                    did_start = true;
                 }
                 let should_sample = analysis.screenshot_timeline.is_empty()
                     || (now_ms - analysis.screenshot_timeline.last().unwrap().timestamp) >= 3000.0;
@@ -125,6 +127,11 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 tracing::warn!("Screenshot for unknown analysis {}", analysis_id);
                 false
             };
+            if did_start {
+                if let Some(a) = state.analyses.get(analysis_id) {
+                    state.persist_analysis(a.clone());
+                }
+            }
             if should_forward {
                 forward_to_viewer(state, analysis_id, &event);
             }
@@ -236,6 +243,9 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 if headless.is_some() {
                     report.headless = headless.clone();
                 }
+            }
+            if let Some(a) = state.analyses.get(analysis_id) {
+                state.persist_analysis(a.clone());
             }
             forward_to_viewer(state, analysis_id, &event);
         }

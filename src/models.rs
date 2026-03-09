@@ -11,6 +11,35 @@ pub struct ScreenshotEntry {
     pub timestamp: f64,
 }
 
+/// Options used when the analysis was started (proxy, viewport, network, geo, etc.). Stored with the analysis for audit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnalysisRunOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub longitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accuracy: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewport_width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub viewport_height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_scale_factor: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_mobile: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network_throttling: Option<String>,
+}
+
 /// One URL analysis: id, status, optional report, last screenshot, and screenshot timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Analysis {
@@ -27,6 +56,15 @@ pub struct Analysis {
     /// In-memory only: last time we forwarded a screenshot to viewers (ms since epoch). Throttles forwarding.
     #[serde(skip)]
     pub last_screenshot_forward_time_ms: Option<f64>,
+    /// User notes (plain text).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    /// User tags for filtering (e.g. "phishing", "false-positive").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Options used when this analysis was started (viewport, network, proxy, geo, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_options: Option<AnalysisRunOptions>,
 }
 
 /// Lifecycle state of an analysis (pending → running → complete | error).
@@ -95,6 +133,8 @@ pub struct AnalysisReport {
     pub security: SecurityInfo,
     pub risk_score: u32,
     pub risk_factors: Vec<String>,
+    #[serde(default)]
+    pub phishing_indicators: Vec<String>,
     #[serde(default)]
     pub detection_attempts: Vec<DetectionAttempt>,
     #[serde(default)]
@@ -180,6 +220,9 @@ pub struct SecurityInfo {
     pub ssl_issuer: Option<String>,
     pub ssl_protocol: Option<String>,
     pub has_mixed_content: bool,
+    /// True when mixed content includes script or iframe (higher risk than images only).
+    #[serde(default)]
+    pub mixed_danger: bool,
     pub suspicious_patterns: Vec<String>,
 }
 

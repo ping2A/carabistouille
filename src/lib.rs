@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use axum::{
     extract::ConnectInfo,
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use tower_http::{
@@ -29,13 +29,21 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/status", get(api::routes::get_status))
         .route("/api/analyses", post(api::routes::create_analysis))
         .route("/api/analyses", get(api::routes::list_analyses))
-        .route("/api/analyses/:id", get(api::routes::get_analysis))
+        .route(
+            "/api/analyses/:id",
+            get(api::routes::get_analysis)
+                .patch(api::routes::update_analysis)
+                .delete(api::routes::delete_analysis),
+        )
         .route("/api/analyses/:id/stop", post(api::routes::stop_analysis))
         .route(
             "/api/analyses/:id/screenshots",
             get(api::routes::get_screenshots),
         )
-        .route("/api/analyses/:id", delete(api::routes::delete_analysis))
+        .route(
+            "/api/analyses/:id/virustotal",
+            get(api::routes::get_virustotal),
+        )
         .route("/ws/agent", get(api::ws::agent_ws_handler))
         .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler))
         .fallback_service(ServeDir::new("web"))

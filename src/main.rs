@@ -9,6 +9,8 @@ use tracing_subscriber::EnvFilter;
 /// Simple CLI flag parser (avoids adding clap for a handful of flags).
 struct CliArgs {
     clean_db: bool,
+    /// Path to the SQLite database file (overrides DATABASE_PATH env).
+    database: Option<PathBuf>,
     /// Start the agent inside a Docker container instead of expecting a local agent.
     docker_agent: bool,
     /// Browser engine passed into the Docker container (puppeteer | puppeteer-extra).
@@ -21,10 +23,15 @@ struct CliArgs {
     listen: Option<String>,
 }
 
-/// Parse command-line arguments: --clean-db, --docker-agent, --real-chrome, --browser-engine, --wireguard-config.
+/// Parse command-line arguments: --clean-db, --database, --docker-agent, --real-chrome, --browser-engine, --wireguard-config.
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let clean_db = args.iter().any(|a| a == "--clean-db");
+    let database = args
+        .iter()
+        .position(|a| a == "--database" || a == "--db")
+        .and_then(|i| args.get(i + 1).cloned())
+        .map(PathBuf::from);
     let docker_agent = args.iter().any(|a| a == "--docker-agent");
     let real_chrome = args.iter().any(|a| a == "--real-chrome");
 
@@ -53,6 +60,7 @@ fn parse_args() -> CliArgs {
 
     CliArgs {
         clean_db,
+        database,
         docker_agent,
         browser_engine,
         real_chrome,
@@ -118,9 +126,10 @@ async fn main() {
 
     let cli = parse_args();
 
-    let db_path: PathBuf = std::env::var("DATABASE_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("carabistouille.db"));
+    let db_path: PathBuf = cli
+        .database
+        .or_else(|| std::env::var("DATABASE_PATH").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("carabistouille.db"));
 
     if cli.clean_db {
         if db_path.exists() {
@@ -171,11 +180,22 @@ async fn main() {
             cli.real_chrome
         );
 
-        let agent_dir = std::env::var("AGENT_DIR").unwrap_or_else(|_| "agent".to_string());
+        let skip_build = std::env::var("SKIP_AGENT_BUILD")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
-        if let Err(e) = carabistouille::docker::ensure_image(&agent_dir).await {
-            tracing::error!("Failed to build Docker agent image: {}", e);
-            std::process::exit(1);
+        if !skip_build {
+            let agent_dir = std::env::var("AGENT_DIR").unwrap_or_else(|_| "agent".to_string());
+            let agent_path = std::path::Path::new(&agent_dir)
+                .canonicalize()
+                .unwrap_or_else(|_| std::path::PathBuf::from(&agent_dir));
+
+            if let Err(e) = carabistouille::docker::ensure_image(&agent_path).await {
+                tracing::error!("Failed to build Docker agent image: {}", e);
+                std::process::exit(1);
+            }
+        } else {
+            tracing::info!("Skipping Docker image build (SKIP_AGENT_BUILD=1)");
         }
 
         match carabistouille::docker::start_container(

@@ -4,6 +4,89 @@
 
 A malicious URL analyzer with remote browser instrumentation. Submit suspicious URLs, watch the page load in a sandboxed headless Chromium, interact with it remotely, and get a detailed security report with risk scoring.
 
+<p align="center"><img src="./docs/screenshot.png" alt="Carabistouille analyst UI: URL input, viewport with analyzed page, report panel with Network tab and verdict" width="900"></p>
+
+## Setup and run (step-by-step)
+
+### 1. Prerequisites
+
+- **Rust** (stable): [rustup](https://rustup.rs/) — `rustc --version`
+- **Node.js** ≥ 18 and **npm**: [nodejs.org](https://nodejs.org/) — `node --version` and `npm --version`
+- For **Docker** runs: [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine) with `docker` in your PATH
+
+### 2. Get the project
+
+```bash
+git clone <repository-url>
+cd carabistouille
+```
+
+(Or open the project folder you already have.)
+
+### 3. Choose how to run
+
+| Mode | Server | Agent | When to use |
+|------|--------|--------|-------------|
+| **A. Local** | On your machine | On your machine | Development, full control |
+| **B. Docker Compose** | In container | In same container | One-command run, no local Node |
+| **C. Docker agent only** | On your machine | In container | Real Chrome in container, server on host |
+
+### 4. Run (pick one)
+
+**Option A — Local server + local agent**
+
+1. **Terminal 1 — start the server:**
+   ```bash
+   cargo run
+   ```
+   Server listens on `http://localhost:3000` and serves the web UI.
+
+2. **Terminal 2 — install agent deps and start the agent:**
+   ```bash
+   cd agent
+   npm install
+   npm start
+   ```
+   Agent connects to `ws://localhost:3000/ws/agent`.
+
+3. **Browser:** open [http://localhost:3000](http://localhost:3000) (analyst) or [http://localhost:3000/admin.html](http://localhost:3000/admin.html) (admin).
+
+**Option B — Docker Compose (server + agent in one container)**
+
+1. From the project root:
+   ```bash
+   docker compose build
+   docker compose up
+   ```
+2. Open [http://localhost:3000](http://localhost:3000). Data is stored in the `carabistouille-data` volume.
+
+**Option C — Server on host, agent in Docker (e.g. real Chrome in container)**
+
+1. From the project root (Docker must be in PATH, e.g. run from a terminal):
+   ```bash
+   cargo run --release -- --docker-agent --real-chrome
+   ```
+   This builds the agent image, starts the container, and runs the server. The agent runs Chrome in headed mode (Xvfb) inside the container.
+
+2. If you see *Docker not found*, build the image once in a terminal where `docker` works, then skip the build:
+   ```bash
+   cd agent && docker build --platform linux/amd64 -t carabistouille-agent . && cd ..
+   SKIP_AGENT_BUILD=1 cargo run --release -- --docker-agent --real-chrome
+   ```
+3. Open [http://localhost:3000](http://localhost:3000).
+
+### 5. Use the app
+
+1. In the analyst UI, enter a URL and start an analysis.
+2. When the page loads, you can click, scroll, type, and use **Finish** to generate the report.
+3. Use the **Network**, **Scripts**, **Console**, **Raw**, **Screenshots**, and **Security** tabs to inspect the captured data and risk score.
+
+### 6. Optional next steps
+
+- **TLS / HTTPS:** see [TLS / HTTPS](#tls--https) (e.g. `TLS_SELF_SIGNED=true cargo run`).
+- **WireGuard VPN:** see [WireGuard VPN output](#wireguard-vpn-output) and use `--wireguard-config /path/to/wg0.conf` with `--docker-agent`.
+- **CLI flags:** `--clean-db`, `--database` / `--db`, `--listen`, `--browser-engine` — see [Configuration](#configuration) and the flags table.
+
 ## Architecture Overview
 
 ```
@@ -246,27 +329,30 @@ Each analysis spawns a **new** Chromium (headless or headed / real Chrome). No s
 
 ## Risk Scoring
 
-The agent computes a risk score from 0 to 100 based on these factors:
+The agent computes a risk score from 0 to 100 using **conservative thresholds** to reduce false positives. Only strong or clearly suspicious signals add significant points; common benign patterns are down-weighted or ignored.
 
 ```
- Factor                              Points
- ======                              ======
- Multiple redirects (> 2)            +20
- High third-party requests (> 20)    +15
- No HTTPS                            +25
- Mixed content                       +10
- Suspicious JS patterns (each):      +15
-   - eval() + unescape()
-   - document.write(unescape(...))
-   - Excessive iframes (> 5)
-   - Hidden forms
-   - Delayed redirect (setTimeout)
-   - Cross-origin form submission
- Excessive inline scripts (> 10)     +10
- Clipboard hijack detected           +30
+ Factor                                    Points    Notes
+ ======                                    ======    -----
+ Long redirect chain (≥ 5)                 +10       Legit sites often have 2–3 redirects
+ Very high third-party requests (> 50)     +8        Modern sites often have 20+
+ No HTTPS                                  +22       Strong signal
+ Mixed content (script/iframe over HTTP)    +12       Dangerous mixed content only
+ Mixed content (images only)               +3        Low weight
+ Suspicious patterns (capped total 25):    +6 each   eval+unescape (proximity), document.write
+   - Obfuscated JS (eval + unescape)                   unescape, excessive iframes (> 12),
+   - document.write with unescape                      multiple cross-origin forms (> 2)
+   - Excessive iframes (> 12)
+   - Multiple cross-origin forms (> 2)
+ Very high inline scripts (> 25)           +6
+ Clipboard: repeated writes (≥ 2)          +22       Strong hijack indicator
+ Clipboard: write without user action     +18       e.g. on stop/poll/navigation
+ Clipboard: single write on user action   +5        Low confidence
                                      --------
                               max    100
 ```
+
+Removed or relaxed to avoid FPs: “hidden forms”, “delayed redirect”, “cross-origin form” (unless many), and low thresholds for redirects, third-party, and inline scripts.
 
 ## Per-analysis Browser Isolation
 
@@ -416,6 +502,9 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Finish** button to stop a running analysis and get a partial report.
 - **Analysis timeout** — Analyses are force-stopped after 5 minutes if still running.
 - Proxy support (HTTP, SOCKS4, SOCKS5) per analysis to hide your IP.
+- **Geolocation & locale** — Optional timezone (e.g. `Europe/Paris`), locale (e.g. `fr-FR`), and latitude/longitude per analysis. Toggle the geo row (📍) in the submit form to simulate a different location or language for the analyzed page.
+- **Viewport presets** — Choose a viewport size before analyzing: Default, Desktop (1920×1080), Mobile (375×667), Tablet (768×1024), or Laptop (1366×768). Mobile preset enables touch emulation.
+- **Network throttling** — Optionally emulate Fast 3G or Slow 3G during the run (via CDP `Network.emulateNetworkConditions`) to test behavior on slow connections.
 - Resilient navigation with multiple `waitUntil` strategies and CDP fallback.
 
 ### Capture & Monitoring
@@ -434,7 +523,8 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Raw files** — Full response bodies of text-based resources (HTML, JS, CSS, JSON, XML, SVG) stored server-side and persisted across analysis switches. Expandable with syntax highlighting, copy, and download.
 - **Page source** — Rendered HTML of the main document captured after navigation, shown as a pinned entry in the Raw tab.
 - **Clipboard monitoring** — Detects clipboard hijacking (clickfix / paste-theft) by intercepting `navigator.clipboard.writeText`, `navigator.clipboard.write`, `document.execCommand('copy')`, and `copy` DOM events. Shows captured content in the Security tab.
-- **Screenshot timeline** — Screenshots are taken every 1.5 s (interval) and after each interaction; the server samples one into the timeline every 3 s. Browse them in a gallery with a full-screen viewer after analysis completes. Download individual screenshots.
+- **Screenshot timeline** — Screenshots are taken every 1.5 s (interval) and after each interaction; the server samples one into the timeline every 3 s. Browse them in a gallery with a full-screen viewer after analysis completes. Use the **timeline scrubber** to jump to a moment and sync the main viewport. Download individual screenshots.
+- **Session recording (video)** — Export the screenshot timeline as a **WebM video** (report header: video icon). The video is generated in the browser from the captured frames at their original timestamps, so playback reflects the real timing of the session.
 - **Last screenshot persistence** — Completed analyses show the final viewport screenshot when revisited.
 
 ### Security Analysis
@@ -458,6 +548,11 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Download buttons** — Download any raw file, script source, page source, or screenshot.
 - **Absolute + relative timestamps** — Shown on all network requests, scripts, console logs, and raw files.
 - **Report tabs** — Network, Scripts, Console, Raw, Screenshots, Security, Detection. **Engine badge** — Shows puppeteer or puppeteer-extra for the current analysis.
+- **Notes & tags** — Add notes and tags to each analysis; filter the history list by tag. Notes and tags are saved via **Save** and persisted in the database.
+- **Run options stored** — All parameters used for an analysis (proxy, user agent, viewport, network throttling, timezone, locale, geolocation) are saved with the analysis. In the report, open **Options used for this analysis** to see them; they are also returned in `GET /api/analyses/:id` as `run_options` and shown in the admin detail view.
+- **VirusTotal / URL reputation** — In the report header, use **VT** to check the analysis URL on VirusTotal. The check runs on the server (the UI never calls VirusTotal directly). You can set your API key in **Settings** (gear icon); it is stored in the browser and sent to the server when you click “Check VirusTotal”. Alternatively, set `VIRUSTOTAL_API_KEY` on the server (see [Configuration](#configuration)).
+- **Report export** — **Export PDF** opens a printable summary (URL, status, risk score, risk factors, notes, tags) in a new window so you can save as PDF.
+- **Permalink** — The current analysis is reflected in the URL (`?id=<analysis-id>`). Use **Copy link** (🔗) to share a direct link to an analysis; opening that URL selects the analysis.
 - Admin dashboard with overview of all analyses, stats, detail view, and delete (removes from server and database).
 
 ### Infrastructure
@@ -469,34 +564,15 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 
 ## Prerequisites
 
-- Rust (stable)
-- Node.js >= 18
-- npm
+- Rust (stable), Node.js ≥ 18, npm — see [Setup and run (step-by-step)](#setup-and-run-step-by-step) for install links and optional Docker.
 
 ## Quick Start
 
-**1. Start the Rust server:**
+See **[Setup and run (step-by-step)](#setup-and-run-step-by-step)** for the full guide. Short version:
 
-```bash
-cargo run
-```
-
-The server listens on `http://localhost:3000` and serves the web UI.
-
-**2. Start the Puppeteer agent (separate terminal):**
-
-```bash
-cd agent
-npm install
-npm start
-```
-
-The agent connects to the server via WebSocket at `ws://localhost:3000/ws/agent`.
-
-**3. Open the dashboard:**
-
-- Analyst view: [http://localhost:3000](http://localhost:3000)
-- Admin view: [http://localhost:3000/admin.html](http://localhost:3000/admin.html)
+- **Local:** `cargo run` (terminal 1), then `cd agent && npm install && npm start` (terminal 2). Open [http://localhost:3000](http://localhost:3000).
+- **Docker Compose:** `docker compose up` from project root, then [http://localhost:3000](http://localhost:3000).
+- **Agent in Docker:** `cargo run --release -- --docker-agent --real-chrome` from project root (requires Docker in PATH).
 
 ## Docker
 
@@ -531,7 +607,12 @@ docker run --rm -p 3000:3000 -v carabistouille-data:/data carabistouille
 
 Mount a volume at `/data` to persist the database. The image uses system Chromium and the existing agent config (including `--no-sandbox` for Docker).
 
-**Agent-only in Docker (server on host):** Run the server on your machine and the agent in a container with `cargo run -- --docker-agent`. Add `--real-chrome` to run Chrome in headed mode (non-headless) inside the container using Xvfb for a more realistic browser and better anti-detection.
+**Agent-only in Docker (server on host):** Run the server on your machine and the agent in a container with `cargo run -- --docker-agent`. Add `--real-chrome` to run Chrome in headed mode (non-headless) inside the container using Xvfb for a more realistic browser and better anti-detection. Run from the project root so the `agent` directory is found. If you see *Docker not found*, ensure Docker Desktop is running and `docker` is in your PATH (e.g. run from a terminal where `docker` works). To build the image manually (e.g. from a terminal where `docker` is available) and then skip the build when starting the server:
+
+```bash
+cd agent && docker build --platform linux/amd64 -t carabistouille-agent . && cd ..
+SKIP_AGENT_BUILD=1 cargo run --release -- --docker-agent --real-chrome
+```
 
 ### WireGuard VPN output
 
@@ -617,7 +698,8 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 
 | Flag | Description |
 |------|-------------|
-| `--clean-db` | Delete the SQLite database file before starting (path from `DATABASE_PATH`). Server then starts with an empty analyses list and recreates the DB on first write. |
+| `--clean-db` | Delete the SQLite database file before starting (path from `--database` or `DATABASE_PATH`). Server then starts with an empty analyses list and recreates the DB on first write. |
+| `--database <path>` / `--db <path>` | Path to the SQLite database file. Overrides `DATABASE_PATH`. |
 | `--docker-agent` | Run the Puppeteer agent inside a Docker container instead of a local process. The server builds the image from `agent/` and starts the container; the agent connects back via `host.docker.internal`. |
 | `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
 | `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
@@ -634,23 +716,25 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 | `PORT` | `3000` | Server listen port. Ignored if `LISTEN` is set. |
 | `LISTEN` | — | Full bind address `host:port` (e.g. `127.0.0.1:3000`). Overrides `HOST` and `PORT` when set. |
 | `RUST_LOG` | `carabistouille=debug` | Server log level |
-| `DATABASE_PATH` | `carabistouille.db` | Path to SQLite database file (analyses persistence) |
+| `DATABASE_PATH` | `carabistouille.db` | Path to SQLite database file (analyses persistence). Overridden by `--database` / `--db`. |
 | `TLS_CERT` | — | Path to PEM certificate file (enables TLS) |
 | `TLS_KEY` | — | Path to PEM private key file (requires `TLS_CERT`) |
 | `TLS_SELF_SIGNED` | `false` | Set to `true` to auto-generate a self-signed cert |
 | `SERVER_URL` | `ws://localhost:3000/ws/agent` | Agent: server WebSocket URL |
 | `TLS_REJECT_UNAUTHORIZED` | `false` | Agent: reject invalid TLS certs (set `true` for production) |
 | `WIREGUARD_CONFIG_PATH` | — | Path to WireGuard config file; when set, the agent/container brings up the interface so all browser traffic goes through the VPN (Docker: use with `cap_add: [NET_ADMIN]` and mount the config). |
+| `VIRUSTOTAL_API_KEY` | — | VirusTotal API key for URL reputation checks. Optional if users set the key in the UI (Settings). When “Check VirusTotal” is used, the server uses the key from the request header (from UI) or this env var. Get a key at [virustotal.com](https://www.virustotal.com/gui/my-apikey). |
 
 ## REST API
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/status` | Agent connection status + analysis count |
-| `POST` | `/api/analyses` | Submit URL for analysis (accepts `url`, optional `proxy`, optional `user_agent`) |
+| `POST` | `/api/analyses` | Submit URL for analysis (accepts `url`, optional `proxy`, `user_agent`, `viewport_width`, `viewport_height`, `device_scale_factor`, `is_mobile`, `network_throttling`, and geo/locale fields) |
 | `GET` | `/api/analyses` | List all analyses (sorted newest first) |
-| `GET` | `/api/analyses/:id` | Get analysis details + report (includes last screenshot for completed) |
+| `GET` | `/api/analyses/:id` | Get analysis details + report (includes last screenshot for completed). Response includes `run_options` when the analysis was created with overrides: proxy, user_agent, viewport, network_throttling, timezone, locale, geo. |
 | `GET` | `/api/analyses/:id/screenshots` | Get screenshot timeline for an analysis |
+| `GET` | `/api/analyses/:id/virustotal` | Look up the analysis URL on VirusTotal; returns `{ malicious, total, report_url }`. Send API key via header `X-VirusTotal-API-Key` (from UI Settings) or set `VIRUSTOTAL_API_KEY` on the server. |
 | `POST` | `/api/analyses/:id/stop` | Stop a running analysis (returns partial report) |
 | `DELETE` | `/api/analyses/:id` | Delete an analysis (removes from in-memory state and SQLite database) |
 
@@ -662,26 +746,3 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 | `/ws/agent` | Agent -> Server | Events: screenshot, network_request_captured, console_log_captured, redirect_detected, script_loaded, navigation_complete, raw_file_captured, page_source_captured, clipboard_captured, analysis_complete, element_info, error, agent_ready. *network_request_captured* carries full request/response metadata (headers, payload, timing, TLS, initiator, failure). |
 | `/ws/viewer/:id` | Viewer -> Server | Commands: click, scroll, mousemove, type_text, keypress, inspect, stop_analysis |
 | `/ws/viewer/:id` | Server -> Viewer | All agent events forwarded + report_snapshot on connect + screenshot_timeline_available notification |
-
-## Analysis States
-
-```
- PENDING ---------> RUNNING ---------> COMPLETE
-    |                  |                   ^
-    |                  |                   |
-    |                  +--- (user stop) ---+
-    |                  |
-    +------------------+---> ERROR
-```
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Server | Rust, Axum, Tokio, DashMap, Tower-HTTP, rustls (TLS), rcgen (self-signed certs) |
-| Agent | Node.js, Puppeteer (v24+), ws; optional puppeteer-extra + stealth plugin |
-| Frontend | Vanilla JS, WebSocket API, Fetch API, highlight.js (syntax highlighting) |
-| Browser | One Chromium per analysis (Puppeteer; `headless: 'new'` or headed / real Chrome with Xvfb in Docker) |
-| State | In-memory (DashMap + broadcast channels) + SQLite persistence (analyses) |
-| Screenshots | WebP quality 20, interval 1500 ms, server forward throttle 1000 ms, timeline sample 3 s |
-| Detection | Injected monitors (navigator, screen, matchMedia, cookie, location); Detection tab in UI |

@@ -90,12 +90,28 @@ class Agent {
 
     try {
       switch (type) {
-        case 'navigate':
+        case 'navigate': {
           const proxy = command.proxy ?? process.env.WIREGUARD_SOCKS_PROXY ?? null;
-          await this.browserManager.createSession(aid, proxy, command.user_agent || null);
+          const sessionOptions = {
+            viewport_width: command.viewport_width,
+            viewport_height: command.viewport_height,
+            device_scale_factor: command.device_scale_factor,
+            is_mobile: command.is_mobile,
+            network_throttling: command.network_throttling,
+          };
+          await this.browserManager.createSession(aid, proxy, command.user_agent || null, sessionOptions);
+          const page = await this.browserManager.getPage(aid);
+          await this.browserManager.applyGeoAndLocale(page, {
+            timezoneId: command.timezone_id || undefined,
+            locale: command.locale || undefined,
+            latitude: command.latitude,
+            longitude: command.longitude,
+            accuracy: command.accuracy,
+          });
           await this.analyzer.startAnalysis(aid, command.url, (evt) => this.send(evt));
           console.log(`[agent] Analysis ${aid} is live, waiting for stop command`);
           break;
+        }
 
         case 'click':
           await this.browserManager.click(aid, command.x, command.y);

@@ -1,3 +1,22 @@
+/** Verdict tag values (must match main app). */
+const VERDICT_TAGS = Object.freeze({
+  FALSE_POSITIVE: 'false positive',
+  MALICIOUS: 'malicious',
+  PHISHING: 'phishing',
+  CLICK_FIX: 'click fix',
+});
+
+/** Label for display (verdict badge). */
+function getVerdictLabel(tags) {
+  if (!Array.isArray(tags)) return null;
+  const s = new Set(tags.map((t) => String(t).toLowerCase()));
+  if (s.has(VERDICT_TAGS.FALSE_POSITIVE)) return 'False positive';
+  if (s.has(VERDICT_TAGS.PHISHING)) return 'Phishing';
+  if (s.has(VERDICT_TAGS.CLICK_FIX)) return 'Click fix';
+  if (s.has(VERDICT_TAGS.MALICIOUS)) return 'Malicious';
+  return null;
+}
+
 /**
  * Admin dashboard UI: analyses list, stats, detail view, delete, agent status polling.
  */
@@ -51,6 +70,8 @@ class AdminApp {
     this.detailEl = document.getElementById('admin-detail');
     this.detailBody = document.getElementById('detail-body');
     this.detailTitle = document.getElementById('detail-title');
+    this.detailOpenLink = document.getElementById('detail-open-link');
+    this.detailCopyLink = document.getElementById('detail-copy-link');
     this.agentStatus = document.getElementById('agent-status');
     this.statusText = this.agentStatus.querySelector('.status-text');
   }
@@ -124,10 +145,18 @@ class AdminApp {
       const requests = a.report ? a.report.network_requests.length : '—';
       const scripts = a.report ? a.report.scripts.length : '—';
       const redirects = a.report ? a.report.redirect_chain.length : '—';
+      const verdictLabel = getVerdictLabel(a.tags || []);
+      const verdictClass = verdictLabel === 'False positive' ? 'false-positive' : 'malicious';
+      const otherTags = (a.tags || []).filter((t) => !['false positive', 'malicious', 'phishing', 'click fix'].includes(String(t).toLowerCase()));
+      const tagsPreview = otherTags.length > 0 ? otherTags.slice(0, 3).join(', ') + (otherTags.length > 3 ? '…' : '') : '';
 
       return `
         <tr class="${a.id === this.selectedId ? 'selected' : ''}" data-id="${a.id}">
           <td><span class="status-pill ${a.status}">${a.status}</span></td>
+          <td class="verdict-cell">
+            ${verdictLabel ? `<span class="verdict-pill verdict-pill-${verdictClass}">${this.esc(verdictLabel)}</span>` : '—'}
+            ${tagsPreview ? `<span class="tags-preview" title="${this.esc((a.tags || []).join(', '))}">${this.esc(tagsPreview)}</span>` : ''}
+          </td>
           <td class="url-cell" title="${this.esc(a.url)}">${this.esc(a.url)}</td>
           <td class="time-cell">${created}</td>
           <td class="time-cell">${completed}</td>
@@ -136,6 +165,9 @@ class AdminApp {
           <td class="num-cell">${scripts}</td>
           <td class="num-cell">${redirects}</td>
           <td class="actions-cell">
+            <a href="/?id=${this.esc(a.id)}" class="row-btn open-btn" data-id="${a.id}" title="${this.t('admin.openInAnalyzer')}" target="_blank" rel="noopener">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+            </a>
             <button class="row-btn view-btn" data-id="${a.id}" title="${this.t('admin.viewDetails')}">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
@@ -173,6 +205,20 @@ class AdminApp {
     this.selectedId = id;
     this.renderTable();
 
+    const permalink = `${window.location.origin}/?id=${id}`;
+    if (this.detailOpenLink) {
+      this.detailOpenLink.href = permalink;
+      this.detailOpenLink.style.display = 'inline-flex';
+    }
+    if (this.detailCopyLink) {
+      this.detailCopyLink.onclick = () => {
+        navigator.clipboard.writeText(permalink).then(() => {
+          this.detailCopyLink.textContent = this.t('admin.copied') || 'Copied!';
+          setTimeout(() => { this.detailCopyLink.textContent = 'Copy link'; }, 2000);
+        });
+      };
+    }
+
     try {
       const res = await fetch(`/api/analyses/${id}`);
       if (!res.ok) return;
@@ -192,16 +238,46 @@ class AdminApp {
    * @returns {string} HTML string.
    */
   renderDetail(a) {
+    const verdictLabel = getVerdictLabel(a.tags || []);
+    const verdictClass = verdictLabel === 'False positive' ? 'false-positive' : 'malicious';
+    const tagsList = (a.tags || []).map((t) => this.esc(t)).join(', ');
+    const notes = (a.notes || '').trim();
+
     let html = `
       <div class="detail-section">
         <div class="detail-grid">
           <div class="detail-field"><span class="field-label">ID</span><span class="field-value mono">${this.esc(a.id)}</span></div>
           <div class="detail-field"><span class="field-label">Status</span><span class="status-pill ${a.status}">${a.status}</span></div>
+          ${verdictLabel ? `<div class="detail-field"><span class="field-label">Verdict</span><span class="verdict-pill verdict-pill-${verdictClass}">${this.esc(verdictLabel)}</span></div>` : ''}
           <div class="detail-field"><span class="field-label">URL</span><span class="field-value mono">${this.esc(a.url)}</span></div>
           <div class="detail-field"><span class="field-label">Created</span><span class="field-value">${new Date(a.created_at).toLocaleString()}</span></div>
           <div class="detail-field"><span class="field-label">Completed</span><span class="field-value">${a.completed_at ? new Date(a.completed_at).toLocaleString() : '—'}</span></div>
         </div>
       </div>`;
+
+    const opts = a.run_options;
+    if (opts && (opts.proxy || opts.user_agent || opts.timezone_id || opts.locale || opts.viewport_width != null || opts.network_throttling || opts.latitude != null || opts.longitude != null)) {
+      const parts = [];
+      if (opts.proxy) parts.push(`<div class="detail-field"><span class="field-label">Proxy</span><span class="field-value mono">${this.esc(opts.proxy)}</span></div>`);
+      if (opts.user_agent) { const ua = String(opts.user_agent); parts.push(`<div class="detail-field"><span class="field-label">User agent</span><span class="field-value mono">${this.esc(ua.length > 80 ? ua.slice(0, 80) + '…' : ua)}</span></div>`); }
+      if (opts.viewport_width != null && opts.viewport_height != null) parts.push(`<div class="detail-field"><span class="field-label">Viewport</span><span class="field-value">${opts.viewport_width}×${opts.viewport_height}</span></div>`);
+      if (opts.device_scale_factor != null) parts.push(`<div class="detail-field"><span class="field-label">Device scale</span><span class="field-value">${opts.device_scale_factor}</span></div>`);
+      if (opts.is_mobile != null) parts.push(`<div class="detail-field"><span class="field-label">Mobile</span><span class="field-value">${opts.is_mobile ? 'Yes' : 'No'}</span></div>`);
+      if (opts.network_throttling) parts.push(`<div class="detail-field"><span class="field-label">Network throttling</span><span class="field-value">${this.esc(opts.network_throttling)}</span></div>`);
+      if (opts.timezone_id) parts.push(`<div class="detail-field"><span class="field-label">Timezone</span><span class="field-value">${this.esc(opts.timezone_id)}</span></div>`);
+      if (opts.locale) parts.push(`<div class="detail-field"><span class="field-label">Locale</span><span class="field-value">${this.esc(opts.locale)}</span></div>`);
+      if (opts.latitude != null || opts.longitude != null) parts.push(`<div class="detail-field"><span class="field-label">Geo</span><span class="field-value">${opts.latitude ?? '—'}, ${opts.longitude ?? '—'}</span></div>`);
+      html += `<div class="detail-section"><h3>Options used</h3><div class="detail-grid">${parts.join('')}</div></div>`;
+    }
+
+    if (tagsList || notes) {
+      html += `
+      <div class="detail-section">
+        <h3>Notes &amp; Tags</h3>
+        ${notes ? `<div class="detail-notes">${this.esc(notes)}</div>` : ''}
+        ${tagsList ? `<div class="detail-tags"><span class="field-label">Tags</span> ${tagsList}</div>` : ''}
+      </div>`;
+    }
 
     if (!a.report) {
       html += '<div class="detail-section"><div class="detail-empty">No report available</div></div>';

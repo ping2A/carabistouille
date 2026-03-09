@@ -9,18 +9,69 @@ use tokio::process::Command;
 const IMAGE_NAME: &str = "carabistouille-agent";
 const CONTAINER_NAME: &str = "carabistouille-agent";
 
-/// Ensure the Docker image is built (from `agent/Dockerfile`).
-pub async fn ensure_image(agent_dir: &str) -> Result<(), String> {
-    tracing::info!("Building Docker image '{}' from {}", IMAGE_NAME, agent_dir);
+/// Path to the docker binary. Tries PATH first, then common install locations (e.g. when run from IDE with minimal PATH).
+fn docker_binary() -> String {
+    if which_docker().is_some() {
+        return "docker".to_string();
+    }
+    #[cfg(unix)]
+    {
+        for path in ["/usr/local/bin/docker", "/opt/homebrew/bin/docker"] {
+            if std::path::Path::new(path).is_file() {
+                return path.to_string();
+            }
+        }
+    }
+    "docker".to_string()
+}
 
-    let output = Command::new("docker")
+#[cfg(unix)]
+fn which_docker() -> Option<std::path::PathBuf> {
+    std::env::var_os("PATH").and_then(|paths| {
+        for dir in std::env::split_paths(&paths) {
+            let docker = dir.join("docker");
+            if docker.is_file() {
+                return Some(docker);
+            }
+        }
+        None
+    })
+}
+
+#[cfg(not(unix))]
+fn which_docker() -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Ensure the Docker image is built (from `agent/Dockerfile`).
+/// `agent_dir` should be an absolute path to the agent directory (contains Dockerfile, package.json, etc.).
+pub async fn ensure_image(agent_dir: &std::path::Path) -> Result<(), String> {
+    if !agent_dir.is_dir() {
+        return Err(format!(
+            "Agent directory does not exist or is not a directory: {}",
+            agent_dir.display()
+        ));
+    }
+    let docker = docker_binary();
+    tracing::info!("Building Docker image '{}' from {}", IMAGE_NAME, agent_dir.display());
+
+    let output = Command::new(&docker)
         .args(["build", "--platform", "linux/amd64", "-t", IMAGE_NAME, "."])
         .current_dir(agent_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .output()
         .await
-        .map_err(|e| format!("Failed to run docker build: {e}"))?;
+        .map_err(|e| {
+            if e.raw_os_error() == Some(2) {
+                format!(
+                    "Docker not found. Ensure Docker Desktop is running and 'docker' is in your PATH, or build the image manually:\n  cd agent && docker build --platform linux/amd64 -t {} .",
+                    IMAGE_NAME
+                )
+            } else {
+                format!("Failed to run docker build: {e}")
+            }
+        })?;
 
     if !output.status.success() {
         return Err("docker build failed — check output above".into());
@@ -41,7 +92,8 @@ pub async fn start_container(
     wireguard_config: Option<&std::path::Path>,
 ) -> Result<String, String> {
     // Remove stale container if any
-    let _ = Command::new("docker")
+    let docker = docker_binary();
+    let _ = Command::new(&docker)
         .args(["rm", "-f", CONTAINER_NAME])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -105,7 +157,7 @@ pub async fn start_container(
     }
     args.push(IMAGE_NAME);
 
-    let output = Command::new("docker")
+    let output = Command::new(&docker)
         .args(args)
         .output()
         .await
@@ -128,7 +180,8 @@ pub async fn start_container(
 /// Stop and remove the agent container. Logs but does not fail.
 pub async fn stop_container() {
     tracing::info!("Stopping Docker agent container '{}'", CONTAINER_NAME);
-    let _ = Command::new("docker")
+    let docker = docker_binary();
+    let _ = Command::new(&docker)
         .args(["rm", "-f", CONTAINER_NAME])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -138,8 +191,9 @@ pub async fn stop_container() {
 
 /// Stream container logs to the server's stdout (spawns a background task).
 pub fn stream_logs() -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async {
-        let _ = Command::new("docker")
+    let docker = docker_binary();
+    tokio::spawn(async move {
+        let _ = Command::new(&docker)
             .args(["logs", "-f", CONTAINER_NAME])
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

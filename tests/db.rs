@@ -16,6 +16,9 @@ fn sample_analysis(id: &str, url: &str, status: AnalysisStatus) -> Analysis {
         screenshot: None,
         screenshot_timeline: vec![],
         last_screenshot_forward_time_ms: None,
+        notes: None,
+        tags: vec![],
+        run_options: None,
     }
 }
 

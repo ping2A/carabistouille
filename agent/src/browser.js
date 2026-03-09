@@ -34,18 +34,22 @@ export class BrowserManager {
   }
 
   /**
-   * Start a new Chromium for this analysis (closing any existing one). Applies stealth/detection scripts and optional proxy/UA.
+   * Start a new Chromium for this analysis (closing any existing one). Applies stealth/detection scripts and optional proxy/UA/viewport/network.
    * @param {string} analysisId - Analysis UUID.
    * @param {string|null} [proxy=null] - Optional proxy URL (e.g. socks5://host:port).
    * @param {string|null} [userAgent=null] - Optional User-Agent string.
+   * @param {{ viewportWidth?: number, viewportHeight?: number, deviceScaleFactor?: number, isMobile?: boolean, networkThrottling?: string }} [options=null] - Optional viewport and network overrides.
    * @returns {Promise<import('puppeteer').Page>} The new page.
    */
-  async createSession(analysisId, proxy = null, userAgent = null) {
+  async createSession(analysisId, proxy = null, userAgent = null, options = null) {
     await this.closeSession(analysisId);
+
+    const width = options?.viewport_width ?? options?.viewportWidth ?? this.viewportWidth;
+    const height = options?.viewport_height ?? options?.viewportHeight ?? this.viewportHeight;
 
     const args = [
       ...config.browser.args,
-      `--window-size=${this.viewportWidth},${this.viewportHeight}`,
+      `--window-size=${width},${height}`,
     ];
 
     if (proxy) {
@@ -65,11 +69,18 @@ export class BrowserManager {
       console.log(`[browser] User-Agent set for ${analysisId}: ${uaPreview}`);
     }
 
+    const deviceScaleFactor = options?.device_scale_factor ?? options?.deviceScaleFactor ?? 1;
+    const isMobile = options?.is_mobile ?? options?.isMobile ?? false;
     await page.setViewport({
-      width: this.viewportWidth,
-      height: this.viewportHeight,
-      deviceScaleFactor: 1,
+      width,
+      height,
+      deviceScaleFactor,
+      isMobile,
     });
+
+    if (options?.network_throttling && options.network_throttling !== 'none') {
+      await this._applyNetworkThrottling(page, options.network_throttling);
+    }
 
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
@@ -89,9 +100,79 @@ export class BrowserManager {
 
     const engine = useExtraStealth ? 'puppeteer-extra' : 'puppeteer';
     const headlessLabel = config.browser.headless === false ? 'real Chrome (headed)' : 'headless';
-    this.sessions.set(analysisId, { browser, page, proxy });
-    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, ${headlessLabel}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, active: ${this.sessions.size})`);
+    this.sessions.set(analysisId, {
+      browser,
+      page,
+      proxy,
+      viewportWidth: width,
+      viewportHeight: height,
+      deviceScaleFactor,
+      isMobile,
+    });
+    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, ${headlessLabel}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, viewport: ${width}×${height}@${deviceScaleFactor}x, active: ${this.sessions.size})`);
     return page;
+  }
+
+  /**
+   * Apply network throttling (Slow 3G, Fast 3G) via CDP.
+   * @param {import('puppeteer').Page} page - Puppeteer page.
+   * @param {string} profile - "slow3g" or "fast3g".
+   */
+  async _applyNetworkThrottling(page, profile) {
+    const conditions = {
+      slow3g: { download: (400 * 1024) / 8, upload: (400 * 1024) / 8, latency: 2000 },
+      fast3g: { download: (1.6 * 1024 * 1024) / 8, upload: (750 * 1024) / 8, latency: 562.5 },
+    };
+    const c = conditions[profile.toLowerCase()];
+    if (!c) return;
+    try {
+      await page.emulateNetworkConditions({
+        offline: false,
+        download: c.download,
+        upload: c.upload,
+        latency: c.latency,
+      });
+      console.log(`[browser] Network throttling: ${profile} (${c.download} B/s down, ${c.latency}ms latency)`);
+    } catch (err) {
+      console.warn(`[browser] emulateNetworkConditions failed: ${err.message}`);
+    }
+  }
+
+  /**
+   * Apply geolocation, timezone, and locale to a page (for geo-specific or localized content).
+   * @param {import('puppeteer').Page} page - Puppeteer page.
+   * @param {{ timezoneId?: string, locale?: string, latitude?: number, longitude?: number, accuracy?: number }} options - Optional overrides.
+   */
+  async applyGeoAndLocale(page, options = {}) {
+    if (!options || (!options.timezoneId && !options.locale && (options.latitude == null || options.longitude == null))) {
+      return;
+    }
+    try {
+      if (options.latitude != null && options.longitude != null) {
+        await page.setGeolocation({
+          latitude: options.latitude,
+          longitude: options.longitude,
+          accuracy: options.accuracy ?? 10,
+        });
+        console.log(`[browser] Geolocation set: ${options.latitude}, ${options.longitude}`);
+      }
+      if (options.timezoneId) {
+        await page.emulateTimezone(options.timezoneId);
+        console.log(`[browser] Timezone set: ${options.timezoneId}`);
+      }
+      if (options.locale) {
+        await page.setExtraHTTPHeaders({ 'Accept-Language': options.locale.replace('_', '-') + ',en;q=0.9' });
+        try {
+          const cdp = await page.createCDPSession();
+          await cdp.send('Emulation.setLocaleOverride', { locale: options.locale });
+        } catch (e) {
+          console.warn(`[browser] Locale override skipped: ${e.message}`);
+        }
+        console.log(`[browser] Locale set: ${options.locale}`);
+      }
+    } catch (err) {
+      console.warn(`[browser] applyGeoAndLocale error: ${err.message}`);
+    }
   }
 
   /**
@@ -122,7 +203,11 @@ export class BrowserManager {
     if (!session) throw new Error(`No browser session for analysis ${analysisId}`);
     if (session.page.isClosed()) {
       session.page = await session.browser.newPage();
-      await session.page.setViewport({ width: this.viewportWidth, height: this.viewportHeight });
+      const w = session.viewportWidth ?? this.viewportWidth;
+      const h = session.viewportHeight ?? this.viewportHeight;
+      const dpr = session.deviceScaleFactor ?? 1;
+      const mobile = session.isMobile ?? false;
+      await session.page.setViewport({ width: w, height: h, deviceScaleFactor: dpr, isMobile: mobile });
     }
     return session.page;
   }
@@ -146,10 +231,14 @@ export class BrowserManager {
         opts.quality = quality;
       }
       const raw = await page.screenshot(opts);
+      const session = this.sessions.get(analysisId);
+      const w = session?.viewportWidth ?? this.viewportWidth;
+      const h = session?.viewportHeight ?? this.viewportHeight;
+      const dpr = session?.deviceScaleFactor ?? 1;
       return {
         data: Buffer.from(raw).toString('base64'),
-        width: this.viewportWidth,
-        height: this.viewportHeight,
+        width: Math.round(w * dpr),
+        height: Math.round(h * dpr),
       };
     } catch (err) {
       console.error(`[browser] Screenshot error for ${analysisId}: ${err.message}`);
@@ -158,14 +247,19 @@ export class BrowserManager {
   }
 
   /**
-   * Mouse click at (x, y) in viewport coordinates.
+   * Mouse click at (x, y). Coordinates are in screenshot pixel space (same as the image the viewer sees);
+   * we convert to CSS pixels using the session's deviceScaleFactor so Puppeteer's viewport matches.
    * @param {string} analysisId - Analysis UUID.
-   * @param {number} x - Viewport X.
-   * @param {number} y - Viewport Y.
+   * @param {number} x - X in screenshot/image pixels.
+   * @param {number} y - Y in screenshot/image pixels.
    */
   async click(analysisId, x, y) {
+    const session = this.sessions.get(analysisId);
     const page = await this.getPage(analysisId);
-    await page.mouse.click(x, y);
+    const dpr = session?.deviceScaleFactor ?? 1;
+    const cssX = x / dpr;
+    const cssY = y / dpr;
+    await page.mouse.click(cssX, cssY);
   }
 
   /**
@@ -180,14 +274,18 @@ export class BrowserManager {
   }
 
   /**
-   * Move mouse to (x, y) in viewport coordinates.
+   * Move mouse to (x, y). Coordinates are in screenshot pixel space; convert to CSS using deviceScaleFactor.
    * @param {string} analysisId - Analysis UUID.
-   * @param {number} x - Viewport X.
-   * @param {number} y - Viewport Y.
+   * @param {number} x - X in screenshot/image pixels.
+   * @param {number} y - Y in screenshot/image pixels.
    */
   async moveMouse(analysisId, x, y) {
+    const session = this.sessions.get(analysisId);
     const page = await this.getPage(analysisId);
-    await page.mouse.move(x, y);
+    const dpr = session?.deviceScaleFactor ?? 1;
+    const cssX = x / dpr;
+    const cssY = y / dpr;
+    await page.mouse.move(cssX, cssY);
   }
 
   /**
@@ -900,14 +998,19 @@ export class BrowserManager {
 
   /**
    * Get element at viewport (x, y): tag, id, classes, attributes, text snippet, rect, computed styles.
+   * (x, y) are in screenshot pixel space; we convert to CSS for elementFromPoint.
    * @param {string} analysisId - Analysis UUID.
-   * @param {number} x - Viewport X.
-   * @param {number} y - Viewport Y.
+   * @param {number} x - X in screenshot/image pixels.
+   * @param {number} y - Y in screenshot/image pixels.
    * @returns {Promise<{ tag: string, id?: string, classes: string[], attributes: Object, text: string, rect: { x, y, width, height } } | null>}
    */
   async inspectElement(analysisId, x, y) {
     try {
+      const session = this.sessions.get(analysisId);
       const page = await this.getPage(analysisId);
+      const dpr = session?.deviceScaleFactor ?? 1;
+      const cssX = x / dpr;
+      const cssY = y / dpr;
       return await page.evaluate((px, py) => {
         const el = document.elementFromPoint(px, py);
         if (!el) return null;
@@ -940,7 +1043,7 @@ export class BrowserManager {
             fontSize: styles.fontSize,
           },
         };
-      }, x, y);
+      }, cssX, cssY);
     } catch (err) {
       console.error(`[browser] Inspect error for ${analysisId}: ${err.message}`);
       return null;

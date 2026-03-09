@@ -422,6 +422,7 @@ export class Analyzer {
       ssl_issuer: null,
       ssl_protocol: null,
       has_mixed_content: false,
+      mixed_danger: false,
       suspicious_patterns: [],
     };
 
@@ -432,35 +433,50 @@ export class Analyzer {
         const html = document.documentElement.outerHTML;
         const patterns = [];
 
-        if (html.includes('eval(') && html.includes('unescape('))
-          patterns.push('Obfuscated JavaScript (eval + unescape)');
-        if (html.includes('document.write(unescape('))
-          patterns.push('document.write with unescape');
-        if ((html.match(/iframe/gi) || []).length > 5)
-          patterns.push('Excessive iframes');
-        if (html.includes('display:none') && html.includes('<form'))
-          patterns.push('Hidden forms detected');
-        if (html.includes('window.location') && html.includes('setTimeout'))
-          patterns.push('Delayed redirect detected');
+        // Eval+unescape: require close proximity (obfuscation) to avoid minified/bundled code FP
+        const evalIdx = html.indexOf('eval(');
+        if (evalIdx !== -1 && html.includes('unescape(')) {
+          const window = 400;
+          const slice = html.slice(Math.max(0, evalIdx - 100), evalIdx + window);
+          if (slice.includes('unescape(')) patterns.push('Obfuscated JavaScript (eval + unescape)');
+        }
+        if (html.includes('document.write(unescape(')) patterns.push('document.write with unescape');
 
+        const iframeCount = (html.match(/<iframe/gi) || []).length;
+        if (iframeCount > 12) patterns.push(`Excessive iframes (${iframeCount})`);
+
+        // Skip hidden forms / delayed redirect: too many FPs (modals, consent, "redirecting..." pages)
         const mixedContent = document.querySelectorAll(
           'img[src^="http:"], script[src^="http:"], link[href^="http:"], iframe[src^="http:"]'
         );
+        const mixedScriptOrIframe = document.querySelectorAll('script[src^="http:"], iframe[src^="http:"]');
+        const mixedCount = mixedContent.length;
+        const mixedDangerCount = mixedScriptOrIframe.length;
 
         const forms = document.querySelectorAll('form[action]');
+        let crossOriginForms = 0;
         forms.forEach((f) => {
-          const action = f.getAttribute('action');
-          if (action && !action.startsWith('/') && !action.startsWith(window.location.origin)) {
-            patterns.push(`Cross-origin form submission: ${action}`);
+          const action = (f.getAttribute('action') || '').trim();
+          if (action && !action.startsWith('/') && !action.startsWith('#') && action !== '') {
+            try {
+              const origin = window.location.origin;
+              if (action.indexOf(origin) !== 0) crossOriginForms++;
+            } catch (_) {}
           }
         });
+        if (crossOriginForms > 2) patterns.push(`Multiple cross-origin forms (${crossOriginForms})`);
 
-        return { mixedContentCount: mixedContent.length, patterns };
+        return {
+          mixedContentCount: mixedCount,
+          mixedDangerCount,
+          patterns,
+        };
       });
 
       security.has_mixed_content = pageAnalysis.mixedContentCount > 0;
-      security.suspicious_patterns = pageAnalysis.patterns;
-      console.log(`[analyzer] Security: ssl=${security.ssl_valid}, mixed_content=${security.has_mixed_content}, patterns=${security.suspicious_patterns.length}`);
+      security.mixed_danger = pageAnalysis.mixedDangerCount > 0;
+      security.suspicious_patterns = pageAnalysis.patterns || [];
+      console.log(`[analyzer] Security: ssl=${security.ssl_valid}, mixed_content=${security.has_mixed_content}, mixed_danger=${security.mixed_danger}, patterns=${security.suspicious_patterns.length}`);
     } catch (err) {
       console.error('[analyzer] Security analysis error:', err.message);
     }
@@ -469,54 +485,164 @@ export class Analyzer {
   }
 
   /**
-   * Compute risk score 0–100 and list of risk factors from redirects, third-party, HTTPS, mixed content, patterns, clipboard.
+   * Detect phishing kit / template indicators: password fields, credential forms, brand impersonation.
+   * @param {import('puppeteer').Page} page - Puppeteer page.
+   * @param {string} pageUrl - Final page URL (for hostname check).
+   * @returns {Promise<{ indicators: string[] }>}
+   */
+  async detectPhishingIndicators(page, pageUrl) {
+    let hostname = '';
+    try {
+      hostname = (new URL(pageUrl)).hostname.replace(/^www\./, '').toLowerCase();
+    } catch {
+      return { indicators: [] };
+    }
+
+    try {
+      const indicators = await page.evaluate((currentHost) => {
+        const out = [];
+        const body = document.body ? document.body.innerText : '';
+        const title = (document.title || '').toLowerCase();
+        const html = document.documentElement.outerHTML.toLowerCase();
+
+        // Known brands often impersonated in phishing (domain must NOT match)
+        const brands = [
+          { name: 'Microsoft', domains: ['microsoft.com', 'login.live.com', 'outlook.com', 'office.com'] },
+          { name: 'Google', domains: ['google.com', 'accounts.google.com', 'gmail.com'] },
+          { name: 'Apple', domains: ['apple.com', 'icloud.com'] },
+          { name: 'Amazon', domains: ['amazon.com', 'amazon.'] },
+          { name: 'PayPal', domains: ['paypal.com'] },
+          { name: 'Netflix', domains: ['netflix.com'] },
+          { name: 'Facebook', domains: ['facebook.com', 'fb.com', 'meta.com'] },
+          { name: 'LinkedIn', domains: ['linkedin.com'] },
+          { name: 'Dropbox', domains: ['dropbox.com'] },
+          { name: 'Adobe', domains: ['adobe.com'] },
+          { name: 'DHL', domains: ['dhl.'] },
+          { name: 'FedEx', domains: ['fedex.com'] },
+          { name: 'UPS', domains: ['ups.com'] },
+          { name: 'Bank', domains: [] }, // generic "bank" / "sign in to your account"
+        ];
+
+        for (const b of brands) {
+          const nameLower = b.name.toLowerCase();
+          const inPage = body.includes(b.name) || title.includes(nameLower) || html.includes(nameLower);
+          if (!inPage) continue;
+          const domainMatches = b.domains.length && b.domains.some((d) => currentHost.includes(d) || d.includes(currentHost));
+          if (!domainMatches && b.domains.length > 0) {
+            out.push(`Brand "${b.name}" mentioned but domain is not ${b.domains[0]} (possible impersonation)`);
+          }
+        }
+
+        // Password field + form (credential harvesting)
+        const passwordInputs = document.querySelectorAll('input[type="password"]');
+        if (passwordInputs.length > 0) {
+          const formsWithPassword = Array.from(document.querySelectorAll('form')).filter((f) => f.querySelector('input[type="password"]'));
+          const hasExternalAction = formsWithPassword.some((f) => {
+            const action = (f.getAttribute('action') || '').trim();
+            if (!action || action.startsWith('#') || action.startsWith('/')) return false;
+            try {
+              return new URL(action, document.location.href).origin !== document.location.origin;
+            } catch {
+              return true;
+            }
+          });
+          if (hasExternalAction) out.push('Login form with password field submits to external URL (credential harvesting)');
+          else if (passwordInputs.length >= 2) out.push('Multiple password fields on page (unusual for login)');
+          else out.push('Page contains password input (login/credential form)');
+        }
+
+        // Generic "sign in" / "log in" without obvious brand
+        const signInText = /sign\s*in|log\s*in|login|connexion|anmelden|accedi|iniciar\s*sesión/i;
+        if (signInText.test(body) || signInText.test(title)) {
+          const hasUserOrPass = document.querySelectorAll('input[type="text"], input[type="email"], input[name*="user"], input[name*="login"], input[name*="email"], input[type="password"], input[name*="pass"]').length >= 2;
+          if (hasUserOrPass && passwordInputs.length > 0) out.push('Sign-in / login form with user and password fields');
+        }
+
+        return out;
+      }, hostname);
+
+      return { indicators: indicators || [] };
+    } catch (err) {
+      console.warn('[analyzer] Phishing detection error:', err.message);
+      return { indicators: [] };
+    }
+  }
+
+  /**
+   * Compute risk score 0–100 and list of risk factors. Conservative thresholds to reduce false positives:
+   * only strong or combined signals contribute meaningfully; weak/ambiguous signals are down-weighted or gated.
    * @param {Array} networkRequests - Captured network requests.
    * @param {Array} scripts - Captured scripts (inline and external).
    * @param {Array} redirectChain - Redirect chain from navigation.
    * @param {object} security - Result of analyzeSecurityIndicators.
-   * @param {Array} [clipboardReads=[]] - Intercepted clipboard writes.
+   * @param {Array} [clipboardReads=[]] - Intercepted clipboard writes (content, trigger).
    * @returns {{ riskScore: number, riskFactors: string[] }}
    */
   computeRisk(networkRequests, scripts, redirectChain, security, clipboardReads = []) {
     let riskScore = 0;
     const riskFactors = [];
 
-    if (redirectChain.length > 2) {
-      riskScore += 20;
-      riskFactors.push(`Multiple redirects (${redirectChain.length})`);
+    // Redirects: only flag long chains (many legit sites do 2–3). Threshold 5+, modest points.
+    if (redirectChain.length >= 5) {
+      riskScore += 10;
+      riskFactors.push(`Long redirect chain (${redirectChain.length})`);
     }
 
+    // Third-party: modern sites often have 20+. Only flag very high counts.
     const thirdParty = networkRequests.filter((r) => r.is_third_party);
-    if (thirdParty.length > 20) {
-      riskScore += 15;
-      riskFactors.push(`High third-party requests (${thirdParty.length})`);
+    if (thirdParty.length > 50) {
+      riskScore += 8;
+      riskFactors.push(`Very high third-party requests (${thirdParty.length})`);
     }
 
-    if (!security.ssl_valid) {
-      riskScore += 25;
+    // No HTTPS: strong signal, keep but slightly lower to leave room for other factors.
+    if (security.ssl_valid === false) {
+      riskScore += 22;
       riskFactors.push('No HTTPS');
     }
 
-    if (security.has_mixed_content) {
-      riskScore += 10;
-      riskFactors.push('Mixed content detected');
+    // Mixed content: only score dangerous mixed (script/iframe), and only if multiple or any script.
+    if (security.mixed_danger) {
+      riskScore += 12;
+      riskFactors.push('Mixed content (script or iframe over HTTP)');
+    } else if (security.has_mixed_content) {
+      riskScore += 3;
+      riskFactors.push('Mixed content (images/resources)');
     }
 
-    for (const pattern of security.suspicious_patterns) {
-      riskScore += 15;
+    // Suspicious patterns: cap total contribution and use lower per-pattern points (many patterns are FP-prone).
+    const maxPatternScore = 25;
+    const perPattern = 6;
+    let patternScore = 0;
+    for (const pattern of (security.suspicious_patterns || [])) {
+      patternScore = Math.min(patternScore + perPattern, maxPatternScore);
       riskFactors.push(pattern);
     }
+    riskScore += patternScore;
 
+    // Inline scripts: many sites have 10+. Only flag very high counts.
     const inlineScripts = scripts.filter((s) => s.is_inline);
-    if (inlineScripts.length > 10) {
-      riskScore += 10;
-      riskFactors.push(`Excessive inline scripts (${inlineScripts.length})`);
+    if (inlineScripts.length > 25) {
+      riskScore += 6;
+      riskFactors.push(`Very high inline scripts (${inlineScripts.length})`);
     }
 
-    const nonEmptyClipboard = clipboardReads.filter(r => r.content && r.content.length > 0);
-    if (nonEmptyClipboard.length > 0) {
-      riskScore += 30;
-      riskFactors.push(`Clipboard hijack detected (${nonEmptyClipboard.length} write(s) intercepted)`);
+    // Clipboard: only flag when strongly suggestive of hijack (multiple writes, or write not from user click).
+    const nonEmptyClipboard = clipboardReads.filter((r) => r.content && r.content.length > 0);
+    const triggerStr = (t) => (t || '').toLowerCase();
+    const autoClipboard = nonEmptyClipboard.filter((r) => {
+      const t = triggerStr(r.trigger);
+      return !t || t.startsWith('stop') || t.includes('poll') || t.includes('navigation');
+    });
+    if (nonEmptyClipboard.length >= 2) {
+      riskScore += 22;
+      riskFactors.push(`Repeated clipboard writes (${nonEmptyClipboard.length}) — possible hijack`);
+    } else if (autoClipboard.length >= 1) {
+      riskScore += 18;
+      riskFactors.push('Clipboard write without user action');
+    } else if (nonEmptyClipboard.length >= 1) {
+      riskScore += 5;
+      riskFactors.push('Clipboard write on user action (low confidence)');
     }
 
     return { riskScore: Math.min(riskScore, 100), riskFactors };
@@ -597,6 +723,7 @@ export class Analyzer {
     let finalUrl = null;
     let title = null;
     let security = { ssl_valid: null, ssl_issuer: null, ssl_protocol: null, has_mixed_content: false, suspicious_patterns: [] };
+    let phishingResult = { indicators: [] };
     try {
       const page = await this.browserManager.getPage(analysisId);
       finalUrl = page.url();
@@ -671,17 +798,31 @@ export class Analyzer {
       }
 
       security = await this.analyzeSecurityIndicators(page, state.url);
+
+      // Phishing kit / template detection (run while we still have the page)
+      phishingResult = await this.detectPhishingIndicators(page, finalUrl || state.url);
+      if (phishingResult.indicators.length > 0) {
+        console.log(`[analyzer] Phishing indicators: ${phishingResult.indicators.join('; ')}`);
+      }
     } catch (err) {
       console.warn(`[analyzer] Report data collection error: ${err.message}`);
     }
 
     const allScripts = state.scripts;
+    const phishingIndicators = phishingResult.indicators || [];
 
-    const { riskScore, riskFactors } = this.computeRisk(
+    const { riskScore: baseScore, riskFactors: baseFactors } = this.computeRisk(
       state.networkRequests, allScripts, state.redirectChain, security, state.clipboardReads
     );
 
-    console.log(`[analyzer] Report for ${analysisId}: risk=${riskScore}/100, ${state.networkRequests.length} requests, ${allScripts.length} scripts, ${state.detectionAttempts.length} detection probes`);
+    const phishingScore = Math.min(phishingIndicators.length * 12, 28);
+    const riskScore = Math.min(baseScore + phishingScore, 100);
+    const riskFactors = [...baseFactors];
+    for (const ind of phishingIndicators) {
+      riskFactors.push(`Phishing: ${ind}`);
+    }
+
+    console.log(`[analyzer] Report for ${analysisId}: risk=${riskScore}/100, ${state.networkRequests.length} requests, ${allScripts.length} scripts, ${state.detectionAttempts.length} detection probes, ${phishingIndicators.length} phishing indicators`);
     sendEvent({
       type: 'analysis_complete',
       analysis_id: analysisId,
@@ -697,6 +838,7 @@ export class Analyzer {
         security,
         risk_score: riskScore,
         risk_factors: riskFactors,
+        phishing_indicators: phishingIndicators,
         engine: config.browser.engine || 'puppeteer',
         headless: config.browser.headless !== false,
       },

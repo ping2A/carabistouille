@@ -49,6 +49,7 @@
         <thead>
           <tr>
             <th data-i18n="admin.status">Status</th>
+            <th data-i18n="admin.verdict">Verdict</th>
             <th data-i18n="admin.url">URL</th>
             <th data-i18n="admin.created">Created</th>
             <th data-i18n="admin.completed">Completed</th>
@@ -67,7 +68,11 @@
     <div class="admin-detail" id="admin-detail" style="display:none">
       <div class="detail-header">
         <h2 id="detail-title" data-i18n="admin.detailTitle">Analysis Details</h2>
-        <button id="detail-close" class="detail-close" data-i18n-title="app.close" title="Close">&times;</button>
+        <div class="detail-header-actions">
+          <a id="detail-open-link" href="#" class="detail-action-link" target="_blank" rel="noopener" title="Open in Analyzer">Open</a>
+          <button type="button" id="detail-copy-link" class="detail-action-btn" title="Copy permalink">Copy link</button>
+          <button id="detail-close" class="detail-close" data-i18n-title="app.close" title="Close">&times;</button>
+        </div>
       </div>
       <div class="detail-body" id="detail-body"></div>
     </div>

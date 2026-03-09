@@ -17,6 +17,36 @@ pub enum AgentCommand {
         url: String,
         proxy: Option<String>,
         user_agent: Option<String>,
+        /// IANA timezone ID (e.g. "Europe/Paris"). Applied via CDP before navigation.
+        #[serde(default)]
+        timezone_id: Option<String>,
+        /// BCP 47 locale (e.g. "fr-FR"). Applied via CDP before navigation.
+        #[serde(default)]
+        locale: Option<String>,
+        /// Geolocation latitude (e.g. 48.8566).
+        #[serde(default)]
+        latitude: Option<f64>,
+        /// Geolocation longitude (e.g. 2.3522).
+        #[serde(default)]
+        longitude: Option<f64>,
+        /// Geolocation accuracy in meters (optional).
+        #[serde(default)]
+        accuracy: Option<f64>,
+        /// Viewport width (e.g. 1920). If set with height, overrides default.
+        #[serde(default)]
+        viewport_width: Option<u32>,
+        /// Viewport height (e.g. 1080).
+        #[serde(default)]
+        viewport_height: Option<u32>,
+        /// Device scale factor (e.g. 1 or 2 for retina).
+        #[serde(default)]
+        device_scale_factor: Option<f64>,
+        /// Mobile viewport (touch, etc.).
+        #[serde(default)]
+        is_mobile: Option<bool>,
+        /// Network throttling profile: "none", "slow3g", "fast3g".
+        #[serde(default)]
+        network_throttling: Option<String>,
     },
     Click { analysis_id: String, x: f64, y: f64 },
     Scroll { analysis_id: String, delta_x: f64, delta_y: f64 },

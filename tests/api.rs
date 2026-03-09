@@ -133,6 +133,9 @@ async fn delete_analysis_returns_204_when_exists() {
             screenshot: None,
             screenshot_timeline: vec![],
             last_screenshot_forward_time_ms: None,
+            notes: None,
+            tags: vec![],
+            run_options: None,
         },
     );
     let app = build_router(state);
@@ -143,6 +146,41 @@ async fn delete_analysis_returns_204_when_exists() {
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn update_analysis_returns_200_and_updates_notes_and_tags() {
+    let state = test_state();
+    state.analyses.insert(
+        "patch-me".to_string(),
+        carabistouille::models::Analysis {
+            id: "patch-me".to_string(),
+            url: "https://example.com".to_string(),
+            status: carabistouille::models::AnalysisStatus::Complete,
+            created_at: chrono::Utc::now(),
+            completed_at: None,
+            report: None,
+            screenshot: None,
+            screenshot_timeline: vec![],
+            last_screenshot_forward_time_ms: None,
+            notes: None,
+            tags: vec![],
+            run_options: None,
+        },
+    );
+    let app = build_router(state);
+    let body = serde_json::json!({ "notes": "my note", "tags": ["phishing", "reviewed"] });
+    let req = Request::builder()
+        .method("PATCH")
+        .uri("/api/analyses/patch-me")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = get_json(res).await;
+    assert_eq!(json["notes"], "my note");
+    assert_eq!(json["tags"].as_array().map(|a| a.len()), Some(2));
 }
 
 #[tokio::test]
@@ -214,6 +252,48 @@ async fn create_analysis_accepts_optional_proxy_and_user_agent() {
 }
 
 #[tokio::test]
+async fn create_analysis_stores_run_options_and_returns_them_on_get() {
+    let state = test_state_with_agent();
+    let app = build_router(state.clone());
+    let body = serde_json::json!({
+        "url": "https://example.com",
+        "proxy": "socks5://127.0.0.1:1080",
+        "viewport_width": 1920,
+        "viewport_height": 1080,
+        "network_throttling": "slow3g",
+        "timezone_id": "Europe/Paris",
+        "locale": "fr-FR"
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/analyses")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let json = get_json(res).await;
+    let id = json["id"].as_str().unwrap();
+
+    let app2 = build_router(state);
+    let get_req = Request::builder()
+        .uri(format!("/api/analyses/{}", id))
+        .body(Body::empty())
+        .unwrap();
+    let get_res = app2.oneshot(get_req).await.unwrap();
+    assert_eq!(get_res.status(), StatusCode::OK);
+    let analysis = get_json(get_res).await;
+    let opts = &analysis["run_options"];
+    assert!(opts.is_object());
+    assert_eq!(opts["proxy"], "socks5://127.0.0.1:1080");
+    assert_eq!(opts["viewport_width"], 1920);
+    assert_eq!(opts["viewport_height"], 1080);
+    assert_eq!(opts["network_throttling"], "slow3g");
+    assert_eq!(opts["timezone_id"], "Europe/Paris");
+    assert_eq!(opts["locale"], "fr-FR");
+}
+
+#[tokio::test]
 async fn list_analyses_returns_newest_first() {
     let state = test_state();
     let now = chrono::Utc::now();
@@ -227,6 +307,9 @@ async fn list_analyses_returns_newest_first() {
         screenshot: None,
         screenshot_timeline: vec![],
         last_screenshot_forward_time_ms: None,
+        notes: None,
+        tags: vec![],
+        run_options: None,
     };
     state.analyses.insert(
         "old".to_string(),
@@ -273,6 +356,9 @@ async fn get_analysis_returns_200_and_body_when_exists() {
             screenshot: None,
             screenshot_timeline: vec![],
             last_screenshot_forward_time_ms: None,
+            notes: None,
+            tags: vec![],
+            run_options: None,
         },
     );
     let app = build_router(state);
@@ -303,6 +389,9 @@ async fn stop_analysis_returns_202_when_pending() {
             screenshot: None,
             screenshot_timeline: vec![],
             last_screenshot_forward_time_ms: None,
+            notes: None,
+            tags: vec![],
+            run_options: None,
         },
     );
     let app = build_router(state);
@@ -330,6 +419,9 @@ async fn stop_analysis_returns_409_when_already_complete() {
             screenshot: None,
             screenshot_timeline: vec![],
             last_screenshot_forward_time_ms: None,
+            notes: None,
+            tags: vec![],
+            run_options: None,
         },
     );
     let app = build_router(state);

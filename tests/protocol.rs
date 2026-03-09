@@ -10,6 +10,16 @@ fn agent_command_navigate_roundtrip() {
         url: "https://example.com".to_string(),
         proxy: Some("socks5://127.0.0.1:1080".to_string()),
         user_agent: Some("Custom/1.0".to_string()),
+        timezone_id: None,
+        locale: None,
+        latitude: None,
+        longitude: None,
+        accuracy: None,
+        viewport_width: None,
+        viewport_height: None,
+        device_scale_factor: None,
+        is_mobile: None,
+        network_throttling: None,
     };
     assert_eq!(cmd.type_name(), "navigate");
     let json = serde_json::to_value(&cmd).unwrap();
@@ -18,7 +28,7 @@ fn agent_command_navigate_roundtrip() {
     assert_eq!(json["url"], "https://example.com");
     let back: AgentCommand = serde_json::from_value(json).unwrap();
     match &back {
-        AgentCommand::Navigate { analysis_id, url, proxy, user_agent } => {
+        AgentCommand::Navigate { analysis_id, url, proxy, user_agent, .. } => {
             assert_eq!(analysis_id, "id-1");
             assert_eq!(url, "https://example.com");
             assert_eq!(proxy.as_deref(), Some("socks5://127.0.0.1:1080"));

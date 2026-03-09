@@ -166,6 +166,60 @@
 .risk-medium { color: var(--warning); }
 .risk-high { color: var(--danger); }
 
+.verdict-cell {
+  max-width: 140px;
+  font-size: 12px;
+}
+
+.verdict-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.verdict-pill-false-positive {
+  background: rgba(16, 185, 129, 0.2);
+  color: var(--success);
+}
+
+.verdict-pill-malicious {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--danger);
+}
+
+.tags-preview {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detail-notes {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
+.detail-tags {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.detail-tags .field-label {
+  margin-right: 6px;
+}
+
 .actions-cell {
   display: flex;
   gap: 4px;
@@ -188,6 +242,11 @@
 .row-btn:hover {
   background: var(--bg-hover);
   color: var(--text-primary);
+}
+
+.row-btn.open-btn {
+  text-decoration: none;
+  color: inherit;
 }
 
 .delete-btn:hover {
@@ -238,6 +297,44 @@
   text-overflow: ellipsis;
   flex: 1;
   margin-right: 12px;
+}
+
+.detail-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.detail-action-link {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  text-decoration: none;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.detail-action-link:hover {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+.detail-action-btn {
+  font-size: 12px;
+  padding: 4px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.detail-action-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .detail-close {
