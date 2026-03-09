@@ -503,6 +503,22 @@ export class BrowserManager {
         });
       });
 
+      // WebGL vendor/renderer: headless often returns "none" or "SwiftShader"/"Mesa" — huge red flag for detection scripts.
+      // Spoof to realistic GPU so we don't look like a bot or locked-down VM.
+      const WEBGL_VENDOR = 37445;   // UNMASKED_VENDOR_WEBGL
+      const WEBGL_RENDERER = 37446; // UNMASKED_RENDERER_WEBGL
+      const spoofVendor = 'Intel Inc.';
+      const spoofRenderer = 'Intel Iris OpenGL Engine';
+      for (const Ctx of [typeof WebGLRenderingContext !== 'undefined' && WebGLRenderingContext, typeof WebGL2RenderingContext !== 'undefined' && WebGL2RenderingContext].filter(Boolean)) {
+        if (!Ctx?.prototype?.getParameter) continue;
+        const origGetParameter = Ctx.prototype.getParameter;
+        Ctx.prototype.getParameter = function (param) {
+          if (param === WEBGL_VENDOR) return spoofVendor;
+          if (param === WEBGL_RENDERER) return spoofRenderer;
+          return origGetParameter.call(this, param);
+        };
+      }
+
       // Patch iframe contentWindow.chrome for cross-frame detection
       const origCreateElement = document.createElement.bind(document);
       document.createElement = function (...args) {

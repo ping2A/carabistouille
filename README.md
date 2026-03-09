@@ -490,6 +490,8 @@ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', ...
 
 With the agent’s flags and stealth patches, this kind of flow is much less likely to flag the browser as headless. Stronger or custom detection may still apply.
 
+**Testing detection (local fingerprint page):** Run `python3 tools/detection_test_server.py [--port 8765]` to serve a page that runs the same fingerprint checks often used to detect headless Chrome (WebGL vendor/renderer, `navigator.webdriver`, plugins, languages, `window.chrome`, etc.) and displays the result as JSON. Analyze `http://localhost:8765/` with Carabistouille and compare the report (screenshot + payload) with a real browser to verify stealth behaviour (e.g. `webgl_vendor` should be "Intel Inc." not "none").
+
 ## Features
 
 ### Core Analysis

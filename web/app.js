@@ -1766,13 +1766,53 @@ class App {
 
         detail.querySelectorAll('.net-detail-copy').forEach(btn => {
           btn.addEventListener('click', (e) => {
+            e.preventDefault();
             e.stopPropagation();
-            const target = btn.dataset.copyTarget;
+            const target = btn.getAttribute('data-copy-target') || btn.dataset.copyTarget;
             const el = detail.querySelector(`[data-section="${target}"]`);
-            if (el) {
-              navigator.clipboard.writeText(el.textContent);
+            if (!el) return;
+            const textToCopy = (el.textContent || el.innerText || '').trim();
+            const copyLabel = this.t('app.copy');
+            function setCopied() {
               btn.textContent = 'Copied!';
-              setTimeout(() => { btn.textContent = this.t('app.copy'); }, 1200);
+              setTimeout(() => { btn.textContent = copyLabel; }, 1200);
+            }
+            function setFailed() {
+              btn.textContent = 'Copy failed';
+              setTimeout(() => { btn.textContent = copyLabel; }, 1500);
+            }
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(textToCopy).then(setCopied).catch(() => {
+                try {
+                  const ta = document.createElement('textarea');
+                  ta.value = textToCopy;
+                  ta.setAttribute('readonly', '');
+                  ta.style.position = 'absolute';
+                  ta.style.left = '-9999px';
+                  document.body.appendChild(ta);
+                  ta.select();
+                  document.execCommand('copy');
+                  document.body.removeChild(ta);
+                  setCopied();
+                } catch (err) {
+                  setFailed();
+                }
+              });
+            } else {
+              try {
+                const ta = document.createElement('textarea');
+                ta.value = textToCopy;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'absolute';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+                setCopied();
+              } catch (err) {
+                setFailed();
+              }
             }
           });
         });
@@ -1792,12 +1832,17 @@ class App {
     });
   }
 
-  /** Format headers object as HTML table rows (name/value). */
+  /** Format headers (object or array of {name, value}) as plain text for display and copy. */
   _formatHeaders(headers) {
     if (!headers || typeof headers !== 'object') return null;
-    return Object.entries(headers)
-      .map(([k, v]) => `${this.esc(k)}: ${this.esc(String(v))}`)
-      .join('\n');
+    let entries;
+    if (Array.isArray(headers)) {
+      entries = headers.map(h => (h && (h.name != null || h.value != null)) ? [String(h.name ?? ''), String(h.value ?? '')] : null).filter(Boolean);
+    } else {
+      entries = Object.entries(headers).map(([k, v]) => [k, String(v)]);
+    }
+    if (!entries.length) return null;
+    return entries.map(([k, v]) => `${this.esc(k)}: ${this.esc(v)}`).join('\n');
   }
 
   /** Format a key-value row for request detail HTML. */
@@ -1810,7 +1855,8 @@ class App {
     const s = [];
     const reqHeaders = this._formatHeaders(r.request_headers);
     const respHeaders = this._formatHeaders(r.response_headers);
-    const hasPayload = r.request_body && r.request_body.length > 0;
+    const bodyStr = typeof r.request_body === 'string' ? r.request_body : (r.request_body != null ? JSON.stringify(r.request_body) : '');
+    const hasPayload = bodyStr.length > 0;
     const hasTiming = r.timing && typeof r.timing === 'object';
     const hasSecurity = r.security_details && typeof r.security_details === 'object';
     const hasInitiator = r.initiator && typeof r.initiator === 'object';
@@ -1849,7 +1895,7 @@ class App {
     // Request Headers tab
     if (reqHeaders) {
       s.push('<div class="net-detail-content" data-detail-tab-content="req-headers" style="display:none">');
-      s.push(`<div class="net-detail-section-bar"><button class="net-detail-copy icon-btn" data-copy-target="req-headers">${this.t('app.copy')}</button></div>`);
+      s.push(`<div class="net-detail-section-bar"><button type="button" class="net-detail-copy icon-btn" data-copy-target="req-headers">${this.t('app.copy')}</button></div>`);
       s.push(`<pre class="net-detail-pre" data-section="req-headers">${reqHeaders}</pre>`);
       s.push('</div>');
     }
@@ -1857,21 +1903,23 @@ class App {
     // Response Headers tab
     if (respHeaders) {
       s.push('<div class="net-detail-content" data-detail-tab-content="resp-headers" style="display:none">');
-      s.push(`<div class="net-detail-section-bar"><button class="net-detail-copy icon-btn" data-copy-target="resp-headers">${this.t('app.copy')}</button></div>`);
+      s.push(`<div class="net-detail-section-bar"><button type="button" class="net-detail-copy icon-btn" data-copy-target="resp-headers">${this.t('app.copy')}</button></div>`);
       s.push(`<pre class="net-detail-pre" data-section="resp-headers">${respHeaders}</pre>`);
       s.push('</div>');
     }
 
     // Payload tab
     if (hasPayload) {
-      let prettyPayload = r.request_body;
+      let prettyPayload;
       try {
-        const parsed = JSON.parse(r.request_body);
+        const parsed = JSON.parse(bodyStr);
         prettyPayload = this.esc(JSON.stringify(parsed, null, 2));
-      } catch { prettyPayload = this.esc(r.request_body); }
+      } catch {
+        prettyPayload = this.esc(bodyStr);
+      }
 
       s.push('<div class="net-detail-content" data-detail-tab-content="payload" style="display:none">');
-      s.push(`<div class="net-detail-section-bar"><span class="net-detail-size">${this._formatSize(r.request_body.length)}</span><button class="net-detail-copy icon-btn" data-copy-target="payload">${this.t('app.copy')}</button></div>`);
+      s.push(`<div class="net-detail-section-bar"><span class="net-detail-size">${this._formatSize(bodyStr.length)}</span><button type="button" class="net-detail-copy icon-btn" data-copy-target="payload">${this.t('app.copy')}</button></div>`);
       s.push(`<pre class="net-detail-pre" data-section="payload">${prettyPayload}</pre>`);
       s.push('</div>');
     }
@@ -1910,7 +1958,7 @@ class App {
       const preview = hasResponse.content || '';
       const truncated = preview.length > 5000 ? preview.substring(0, 5000) + '\n… (truncated)' : preview;
       s.push('<div class="net-detail-content" data-detail-tab-content="response" style="display:none">');
-      s.push(`<div class="net-detail-section-bar"><span class="net-detail-size">${this._formatSize(preview.length)}</span><button class="net-detail-copy icon-btn" data-copy-target="response">${this.t('app.copy')}</button></div>`);
+      s.push(`<div class="net-detail-section-bar"><span class="net-detail-size">${this._formatSize(preview.length)}</span><button type="button" class="net-detail-copy icon-btn" data-copy-target="response">${this.t('app.copy')}</button></div>`);
       s.push(`<pre class="net-detail-pre" data-section="response">${this.esc(truncated)}</pre>`);
       s.push('</div>');
     }
