@@ -136,6 +136,7 @@ async fn delete_analysis_returns_204_when_exists() {
             notes: None,
             tags: vec![],
             run_options: None,
+            submitted_via_mcp: false,
         },
     );
     let app = build_router(state, true);
@@ -166,6 +167,7 @@ async fn update_analysis_returns_200_and_updates_notes_and_tags() {
             notes: None,
             tags: vec![],
             run_options: None,
+            submitted_via_mcp: false,
         },
     );
     let app = build_router(state, true);
@@ -310,6 +312,7 @@ async fn list_analyses_returns_newest_first() {
         notes: None,
         tags: vec![],
         run_options: None,
+        submitted_via_mcp: false,
     };
     state.analyses.insert(
         "old".to_string(),
@@ -359,6 +362,7 @@ async fn get_analysis_returns_200_and_body_when_exists() {
             notes: None,
             tags: vec![],
             run_options: None,
+            submitted_via_mcp: false,
         },
     );
     let app = build_router(state, true);
@@ -392,6 +396,7 @@ async fn stop_analysis_returns_202_when_pending() {
             notes: None,
             tags: vec![],
             run_options: None,
+            submitted_via_mcp: false,
         },
     );
     let app = build_router(state, true);
@@ -422,6 +427,7 @@ async fn stop_analysis_returns_409_when_already_complete() {
             notes: None,
             tags: vec![],
             run_options: None,
+            submitted_via_mcp: false,
         },
     );
     let app = build_router(state, true);

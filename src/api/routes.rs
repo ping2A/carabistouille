@@ -129,6 +129,7 @@ pub async fn create_analysis(
         notes: None,
         tags: Vec::new(),
         run_options: if has_any_option { Some(run_options) } else { None },
+        submitted_via_mcp: false,
     };
 
     state.analyses.insert(id.clone(), analysis.clone());

@@ -533,8 +533,57 @@ export class BrowserManager {
       window.__detectionAttempts = [];
       const seen = new Set();
 
+      // Whitelist: don't record bot/fingerprint probes when the call originates from these hosts (CDNs, analytics, tag managers).
+      const CALLER_WHITELIST = [
+        'jsdelivr.net',
+        'cdn.jsdelivr.net',
+        'googletagmanager.com',
+        'www.googletagmanager.com',
+        'google-analytics.com',
+        'www.google-analytics.com',
+        'googleadservices.com',
+        'gstatic.com',
+        'ajax.googleapis.com',
+        'fonts.googleapis.com',
+        'cdnjs.cloudflare.com',
+        'unpkg.com',
+        'cdn.skypack.dev',
+        'connect.facebook.net',
+        'facebook.net',
+        'hotjar.com',
+        'segment.io',
+        'segment.com',
+        'mixpanel.com',
+        'amplitude.com',
+        'fullstory.com',
+        'clarity.ms',
+        'cloudflareinsights.com',
+      ];
+
+      function hostnameFromStackFrame(frame) {
+        const match = frame.match(/https?:\/\/([^/):\s]+)/);
+        if (!match) return null;
+        const host = match[1].toLowerCase().replace(/^www\./, '');
+        return host;
+      }
+
+      function isWhitelistedCaller(stackText) {
+        const frames = stackText.split('\n');
+        for (const frame of frames) {
+          if (frame.includes('evaluateOnNewDocument') || frame.includes('__puppeteer')) continue;
+          const host = hostnameFromStackFrame(frame);
+          if (!host) continue;
+          for (const allowed of CALLER_WHITELIST) {
+            const domain = allowed.toLowerCase().replace(/^www\./, '');
+            if (host === domain || host.endsWith('.' + domain)) return true;
+          }
+        }
+        return false;
+      }
+
       function record(property, category, severity, description) {
         const stack = new Error().stack || '';
+        if (isWhitelistedCaller(stack)) return;
         const frames = stack.split('\n').slice(2).filter(f => !f.includes('evaluateOnNewDocument') && !f.includes('__puppeteer'));
         const caller = frames[0]?.trim() || '';
         const key = `${property}|${caller}`;

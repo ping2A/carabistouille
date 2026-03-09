@@ -19,6 +19,7 @@ fn sample_analysis(id: &str, url: &str, status: AnalysisStatus) -> Analysis {
         notes: None,
         tags: vec![],
         run_options: None,
+        submitted_via_mcp: false,
     }
 }
 

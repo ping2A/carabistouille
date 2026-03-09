@@ -65,6 +65,9 @@ pub struct Analysis {
     /// Options used when this analysis was started (viewport, network, proxy, geo, etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_options: Option<AnalysisRunOptions>,
+    /// True if this analysis was submitted via MCP (not persisted). Used to apply MCP-only behaviour (e.g. no-data delay).
+    #[serde(skip)]
+    pub submitted_via_mcp: bool,
 }
 
 /// Lifecycle state of an analysis (pending → running → complete | error).

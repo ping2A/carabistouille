@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::models::{Analysis, AnalysisRunOptions, AnalysisStatus};
 use crate::protocol::AgentCommand;
-use crate::state::{AppState, DEFAULT_ANALYSIS_TIMEOUT_SECS};
+use crate::state::{AppState, MCP_ANALYSIS_TIMEOUT_SECS};
 
 /// POST /mcp — JSON-RPC 2.0 handler. Returns 404 if MCP is disabled.
 pub async fn mcp_handler(
@@ -151,17 +151,31 @@ async fn handle_tools_call(
         .and_then(|n| n.as_str())
         .unwrap_or("");
 
-    let content = match name {
-        "carabistouille_submit_url" => submit_url(State(state), args).await?,
-        "carabistouille_list_analyses" => list_analyses(State(state), args)?,
-        "carabistouille_get_analysis" => get_analysis(State(state), args)?,
-        "carabistouille_database_summary" => database_summary(State(state))?,
-        _ => return Err((-32602, format!("Unknown tool: {}", name))),
-    };
-
-    Ok(serde_json::json!({
-        "content": [{ "type": "text", "text": content }]
-    }))
+    match name {
+        "carabistouille_get_analysis" => {
+            let resp = get_analysis(State(state), args)?;
+            let mut content = vec![serde_json::json!({ "type": "text", "text": resp.text })];
+            if let Some((ref data, ref media_type)) = resp.screenshot {
+                content.push(serde_json::json!({
+                    "type": "image",
+                    "data": data,
+                    "mediaType": media_type
+                }));
+            }
+            return Ok(serde_json::json!({ "content": content }));
+        }
+        _ => {
+            let text = match name {
+                "carabistouille_submit_url" => submit_url(State(state), args).await?,
+                "carabistouille_list_analyses" => list_analyses(State(state), args)?,
+                "carabistouille_database_summary" => database_summary(State(state))?,
+                _ => return Err((-32602, format!("Unknown tool: {}", name))),
+            };
+            Ok(serde_json::json!({
+                "content": [{ "type": "text", "text": text }]
+            }))
+        }
+    }
 }
 
 async fn submit_url(
@@ -202,10 +216,17 @@ async fn submit_url(
         notes: None,
         tags: Vec::new(),
         run_options: if has_any { Some(run_options) } else { None },
+        submitted_via_mcp: true,
     };
 
     state.analyses.insert(id.clone(), analysis.clone());
     state.persist_analysis(analysis);
+
+    tracing::info!(
+        analysis_id = %id,
+        url = %url,
+        "MCP analysis submitted"
+    );
 
     let _ = state.agent_cmd_tx.send(AgentCommand::Navigate {
         analysis_id: id.clone(),
@@ -224,15 +245,17 @@ async fn submit_url(
         network_throttling: None,
     });
 
+    // MCP analyses use a shorter timeout so they always auto-stop and return results to the client.
     let state_tt = state.clone();
     let id_tt = id.clone();
     let cmd_tx = state.agent_cmd_tx.clone();
     let handle = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(DEFAULT_ANALYSIS_TIMEOUT_SECS)).await;
+        tokio::time::sleep(Duration::from_secs(MCP_ANALYSIS_TIMEOUT_SECS)).await;
         let _ = cmd_tx.send(AgentCommand::StopAnalysis {
             analysis_id: id_tt.clone(),
         });
         state_tt.cancel_analysis_timeout(&id_tt);
+        state_tt.cancel_mcp_no_data_timer(&id_tt);
     });
     state.analysis_timeouts.insert(id.clone(), handle);
 
@@ -297,7 +320,14 @@ fn list_analyses(State(state): State<AppState>, args: &Value) -> Result<String, 
     })
 }
 
-fn get_analysis(State(state): State<AppState>, args: &Value) -> Result<String, (i32, String)> {
+/// Response for get_analysis: text summary and optional screenshot for MCP content array.
+struct GetAnalysisResponse {
+    text: String,
+    /// (base64_data, media_type) e.g. ("...", "image/webp")
+    screenshot: Option<(String, String)>,
+}
+
+fn get_analysis(State(state): State<AppState>, args: &Value) -> Result<GetAnalysisResponse, (i32, String)> {
     let id = args
         .get("id")
         .and_then(|v| v.as_str())
@@ -338,7 +368,9 @@ fn get_analysis(State(state): State<AppState>, args: &Value) -> Result<String, (
     if !a.tags.is_empty() {
         out.push_str(&format!("tags: {}\n", a.tags.join(", ")));
     }
-    Ok(out)
+    // Screenshot is typically WebP from the agent; include so MCP clients can show it.
+    let screenshot = a.screenshot.as_ref().map(|s| (s.clone(), "image/webp".to_string()));
+    Ok(GetAnalysisResponse { text: out, screenshot })
 }
 
 fn database_summary(State(state): State<AppState>) -> Result<String, (i32, String)> {

@@ -505,7 +505,13 @@ export class Analyzer {
         const title = (document.title || '').toLowerCase();
         const html = document.documentElement.outerHTML.toLowerCase();
 
-        // Known brands often impersonated in phishing (domain must NOT match)
+        const passwordInputs = document.querySelectorAll('input[type="password"]');
+        const signInText = /sign\s*in|log\s*in|login|connexion|anmelden|accedi|iniciar\s*sesión/i;
+        const authInputs = document.querySelectorAll('input[type="text"], input[type="email"], input[name*="user"], input[name*="login"], input[name*="email"], input[type="password"], input[name*="pass"]');
+        // Only flag brand impersonation when the page looks like a credential page (reduces FP from "Sign in with Google", analytics, etc.)
+        const hasCredentialContext = passwordInputs.length > 0 || ((signInText.test(body) || signInText.test(title)) && authInputs.length >= 2);
+
+        // Known brands often impersonated in phishing (domain must NOT match); only when page has login/credential context
         const brands = [
           { name: 'Microsoft', domains: ['microsoft.com', 'login.live.com', 'outlook.com', 'office.com'] },
           { name: 'Google', domains: ['google.com', 'accounts.google.com', 'gmail.com'] },
@@ -523,18 +529,19 @@ export class Analyzer {
           { name: 'Bank', domains: [] }, // generic "bank" / "sign in to your account"
         ];
 
-        for (const b of brands) {
-          const nameLower = b.name.toLowerCase();
-          const inPage = body.includes(b.name) || title.includes(nameLower) || html.includes(nameLower);
-          if (!inPage) continue;
-          const domainMatches = b.domains.length && b.domains.some((d) => currentHost.includes(d) || d.includes(currentHost));
-          if (!domainMatches && b.domains.length > 0) {
-            out.push(`Brand "${b.name}" mentioned but domain is not ${b.domains[0]} (possible impersonation)`);
+        if (hasCredentialContext) {
+          for (const b of brands) {
+            const nameLower = b.name.toLowerCase();
+            const inPage = body.includes(b.name) || title.includes(nameLower) || html.includes(nameLower);
+            if (!inPage) continue;
+            const domainMatches = b.domains.length && b.domains.some((d) => currentHost.includes(d) || d.includes(currentHost));
+            if (!domainMatches && b.domains.length > 0) {
+              out.push(`Brand "${b.name}" mentioned but domain is not ${b.domains[0]} (possible impersonation)`);
+            }
           }
         }
 
         // Password field + form (credential harvesting)
-        const passwordInputs = document.querySelectorAll('input[type="password"]');
         if (passwordInputs.length > 0) {
           const formsWithPassword = Array.from(document.querySelectorAll('form')).filter((f) => f.querySelector('input[type="password"]'));
           const hasExternalAction = formsWithPassword.some((f) => {
@@ -552,9 +559,8 @@ export class Analyzer {
         }
 
         // Generic "sign in" / "log in" without obvious brand
-        const signInText = /sign\s*in|log\s*in|login|connexion|anmelden|accedi|iniciar\s*sesión/i;
         if (signInText.test(body) || signInText.test(title)) {
-          const hasUserOrPass = document.querySelectorAll('input[type="text"], input[type="email"], input[name*="user"], input[name*="login"], input[name*="email"], input[type="password"], input[name*="pass"]').length >= 2;
+          const hasUserOrPass = authInputs.length >= 2;
           if (hasUserOrPass && passwordInputs.length > 0) out.push('Sign-in / login form with user and password fields');
         }
 

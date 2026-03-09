@@ -245,7 +245,8 @@ async fn main() {
         None
     };
 
-    // When MCP is enabled, run the MCP server on a separate port (plain HTTP).
+    // When MCP is enabled, run the MCP server on a separate port. Always plain HTTP so MCP clients
+    // (e.g. LM Studio) that expect HTTP get a valid response. Use http://host:MCP_PORT/mcp in the client.
     if cli.mcp {
         let mcp_addr = SocketAddr::new(addr.ip(), cli.mcp_port);
         let mcp_app = build_mcp_router(state);

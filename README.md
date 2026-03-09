@@ -764,7 +764,7 @@ When started with `--mcp` (or `ENABLE_MCP=1`), the server binds the **Model Cont
 - **Query the database** — `carabistouille_list_analyses` (with optional filters) and `carabistouille_get_analysis` (by id) return status, risk score, risk factors, redirect chain, phishing indicators, and other report fields. No screenshot or raw payloads in MCP responses.
 - **Database summary** — `carabistouille_database_summary` returns total count, counts by status (pending / running / complete / error), and a short list of recent analyses (url, status, risk) for quick overview.
 
-**Transport:** MCP is served on a **different port** than the main app. Default: **http://*host*:3001/mcp** (e.g. `http://localhost:3001/mcp`). Configure the port with `MCP_PORT` or `--mcp-port`. The MCP server is plain HTTP on that port; the main app can still use TLS on its own port.
+**Transport:** MCP is served on a **different port** than the main app, **always over plain HTTP**. Default: **http://*host*:3001/mcp** (e.g. `http://localhost:3001/mcp`). Configure the port with `MCP_PORT` or `--mcp-port`. **Use `http://` in your MCP client, not `https://`** — the MCP endpoint does not use TLS so that clients (e.g. LM Studio) that expect HTTP get a valid response.
 
 **Endpoint:** `POST /mcp` on the MCP port — JSON-RPC 2.0. If MCP is disabled, the main app does not expose `/mcp`.
 

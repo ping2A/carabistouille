@@ -13,6 +13,12 @@ use crate::protocol::AgentCommand;
 /// Default analysis timeout: force-stop after this many seconds if still running.
 pub const DEFAULT_ANALYSIS_TIMEOUT_SECS: u64 = 5 * 60; // 5 minutes
 
+/// For MCP-submitted analyses only: if after navigation we still have no network data after this many seconds, finish the analysis.
+pub const MCP_NO_DATA_DELAY_SECS: u64 = 12;
+
+/// Max duration for MCP-submitted analyses: force-stop the analysis and the agent run after this many seconds so MCP clients get results automatically.
+pub const MCP_ANALYSIS_TIMEOUT_SECS: u64 = 60;
+
 /// Global state shared by REST handlers and WebSocket handlers.
 /// Analyses are keyed by UUID; viewer_channels are created on demand per analysis.
 #[derive(Clone)]
@@ -27,6 +33,8 @@ pub struct AppState {
     pub real_chrome: bool,
     /// Per-analysis timeout task: when it fires, server sends StopAnalysis. Aborted when analysis completes or is stopped.
     pub analysis_timeouts: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    /// For MCP analyses: timer that stops the analysis if no network data after MCP_NO_DATA_DELAY_SECS. Aborted when we get any network request.
+    pub mcp_no_data_timers: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     /// Channel to send persistence ops to the SQLite thread. Fire-and-forget; failures are logged in the DB thread.
     pub db_tx: Arc<std::sync::mpsc::Sender<DbOp>>,
     /// When true, POST /mcp is enabled for MCP (Model Context Protocol) JSON-RPC.
@@ -57,6 +65,7 @@ impl AppState {
             docker_agent,
             real_chrome,
             analysis_timeouts: Arc::new(DashMap::new()),
+            mcp_no_data_timers: Arc::new(DashMap::new()),
             db_tx: Arc::new(db_tx),
             mcp_enabled,
         }
@@ -75,6 +84,13 @@ impl AppState {
     /// Cancel the timeout task for this analysis (on complete, error, or user stop). No-op if none.
     pub fn cancel_analysis_timeout(&self, analysis_id: &str) {
         if let Some((_, handle)) = self.analysis_timeouts.remove(analysis_id) {
+            handle.abort();
+        }
+    }
+
+    /// Cancel the MCP no-data timer for this analysis (e.g. when we received network data). No-op if none.
+    pub fn cancel_mcp_no_data_timer(&self, analysis_id: &str) {
+        if let Some((_, handle)) = self.mcp_no_data_timers.remove(analysis_id) {
             handle.abort();
         }
     }

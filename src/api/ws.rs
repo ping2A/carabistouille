@@ -12,9 +12,11 @@ use axum::{
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
 
+use std::time::Duration;
+
 use crate::models::AnalysisStatus;
 use crate::protocol::{AgentCommand, AgentEvent};
-use crate::state::AppState;
+use crate::state::{AppState, MCP_NO_DATA_DELAY_SECS};
 
 /// WebSocket upgrade for /ws/agent. One agent connects; receives commands, sends events.
 pub async fn agent_ws_handler(
@@ -148,6 +150,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 request.url.chars().take(80).collect::<String>(),
                 request.status
             );
+            state.cancel_mcp_no_data_timer(analysis_id);
             if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
                 let report = analysis.report.get_or_insert_with(Default::default);
                 report.network_requests.push(request.clone());
@@ -247,6 +250,35 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             if let Some(a) = state.analyses.get(analysis_id) {
                 state.persist_analysis(a.clone());
             }
+            // For MCP-submitted analyses only: if no network data arrives within a delay, finish the analysis.
+            if state.analyses.get(analysis_id).map(|a| a.submitted_via_mcp).unwrap_or(false) {
+                let state_timer = state.clone();
+                let analysis_id_timer = analysis_id.clone();
+                let cmd_tx = state.agent_cmd_tx.clone();
+                let handle = tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(MCP_NO_DATA_DELAY_SECS)).await;
+                    state_timer.mcp_no_data_timers.remove(&analysis_id_timer);
+                    let should_stop = state_timer
+                        .analyses
+                        .get(&analysis_id_timer)
+                        .map(|a| {
+                            a.status == AnalysisStatus::Running
+                                && a.report.as_ref().map_or(true, |r| r.network_requests.is_empty())
+                        })
+                        .unwrap_or(false);
+                    if should_stop {
+                        tracing::info!(
+                            analysis_id = %analysis_id_timer,
+                            "MCP no-data delay elapsed with no network requests, finishing analysis"
+                        );
+                        let _ = cmd_tx.send(AgentCommand::StopAnalysis {
+                            analysis_id: analysis_id_timer.clone(),
+                        });
+                        state_timer.cancel_analysis_timeout(&analysis_id_timer);
+                    }
+                });
+                state.mcp_no_data_timers.insert(analysis_id.clone(), handle);
+            }
             forward_to_viewer(state, analysis_id, &event);
         }
 
@@ -254,17 +286,10 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             analysis_id,
             report,
         } => {
-            tracing::info!(
-                "Analysis complete for {}: risk_score={}, {} requests, {} scripts, {} risk factors",
-                analysis_id,
-                report.risk_score,
-                report.network_requests.len(),
-                report.scripts.len(),
-                report.risk_factors.len()
-            );
             // Build merged report (server-accumulated raw_files, page_source, etc.) and update state.
             // Do not call state.analyses.get() while holding get_mut() — DashMap would deadlock.
-            let merged = if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+            let (merged, submitted_via_mcp) = if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+                let submitted_via_mcp = analysis.submitted_via_mcp;
                 analysis.status = AnalysisStatus::Complete;
                 analysis.completed_at = Some(chrono::Utc::now());
                 if let Some(data) = analysis.screenshot.clone() {
@@ -286,12 +311,23 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                     }
                 }
                 analysis.report = Some(merged.clone());
-                Some(merged)
+                (Some(merged), submitted_via_mcp)
             } else {
-                None
+                (None, false)
             };
 
+            tracing::info!(
+                analysis_id = %analysis_id,
+                risk_score = report.risk_score,
+                network_requests = report.network_requests.len(),
+                scripts = report.scripts.len(),
+                risk_factors = report.risk_factors.len(),
+                submitted_via_mcp = submitted_via_mcp,
+                "Analysis done"
+            );
+
             state.cancel_analysis_timeout(analysis_id);
+            state.cancel_mcp_no_data_timer(analysis_id);
             if let Some(a) = state.analyses.get(analysis_id) {
                 state.persist_analysis(a.clone());
             }
@@ -418,6 +454,7 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
                 }
             }
             state.cancel_analysis_timeout(analysis_id);
+            state.cancel_mcp_no_data_timer(analysis_id);
             if let Some(a) = state.analyses.get(analysis_id) {
                 state.persist_analysis(a.clone());
             }

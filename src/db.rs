@@ -119,6 +119,7 @@ pub fn load_analyses(path: &Path) -> rusqlite::Result<Vec<Analysis>> {
             notes,
             tags,
             run_options,
+            submitted_via_mcp: false,
         })
     })?;
     let mut out = Vec::new();
