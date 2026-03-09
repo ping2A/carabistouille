@@ -24,8 +24,10 @@ use tracing::Span;
 pub use state::AppState;
 
 /// Build the application router with the given state.
-pub fn build_router(state: AppState) -> Router {
-    Router::new()
+/// When `include_mcp_route` is true, POST /mcp is registered (returns 404 if MCP disabled).
+/// When MCP is enabled (--mcp), the main app typically omits /mcp and MCP is served on a separate port via `build_mcp_router`.
+pub fn build_router(state: AppState, include_mcp_route: bool) -> Router {
+    let mut app = Router::new()
         .route("/api/status", get(api::routes::get_status))
         .route("/api/analyses", post(api::routes::create_analysis))
         .route("/api/analyses", get(api::routes::list_analyses))
@@ -43,12 +45,16 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/analyses/:id/virustotal",
             get(api::routes::get_virustotal),
-        )
-        .route("/mcp", post(api::mcp::mcp_handler))
+        );
+    if include_mcp_route {
+        app = app.route("/mcp", post(api::mcp::mcp_handler));
+    }
+    app = app
         .route("/ws/agent", get(api::ws::agent_ws_handler))
         .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler))
-        .fallback_service(ServeDir::new("web"))
-        .layer(CorsLayer::permissive())
+        .fallback_service(ServeDir::new("web"));
+
+    app.layer(CorsLayer::permissive())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|req: &axum::http::Request<_>| {
@@ -81,6 +87,51 @@ pub fn build_router(state: AppState) -> Router {
                             error = %err,
                             latency_ms = latency.as_millis(),
                             "request failed"
+                        );
+                    },
+                ),
+        )
+        .with_state(state)
+}
+
+/// Build a minimal router that only serves POST /mcp (MCP JSON-RPC). Used when MCP is enabled
+/// and bound to a separate port (e.g. MCP_PORT=3001). Shares the same AppState as the main server.
+pub fn build_mcp_router(state: AppState) -> Router {
+    Router::new()
+        .route("/mcp", post(api::mcp::mcp_handler))
+        .layer(CorsLayer::permissive())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|req: &axum::http::Request<_>| {
+                    let client_ip = req
+                        .extensions()
+                        .get::<ConnectInfo<std::net::SocketAddr>>()
+                        .map(|ci| ci.0.to_string())
+                        .unwrap_or_else(|| "-".into());
+                    tracing::info_span!(
+                        "mcp_request",
+                        method = %req.method(),
+                        uri = %req.uri(),
+                        client = %client_ip,
+                    )
+                })
+                .on_response(
+                    |res: &axum::http::Response<_>, latency: Duration, _span: &Span| {
+                        tracing::info!(
+                            status = res.status().as_u16(),
+                            latency_ms = latency.as_millis(),
+                            "MCP request completed"
+                        );
+                    },
+                )
+                .on_failure(
+                    |err: tower_http::classify::ServerErrorsFailureClass,
+                     latency: Duration,
+                     _span: &Span| {
+                        tracing::error!(
+                            error = %err,
+                            latency_ms = latency.as_millis(),
+                            "MCP request failed"
                         );
                     },
                 ),

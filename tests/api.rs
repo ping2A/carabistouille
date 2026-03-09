@@ -20,7 +20,7 @@ fn test_state_with_agent() -> AppState {
 }
 
 fn app() -> axum::Router {
-    build_router(test_state())
+    build_router(test_state(), true)
 }
 
 async fn get_json(res: Response<Body>) -> serde_json::Value {
@@ -138,7 +138,7 @@ async fn delete_analysis_returns_204_when_exists() {
             run_options: None,
         },
     );
-    let app = build_router(state);
+    let app = build_router(state, true);
     let req = Request::builder()
         .method("DELETE")
         .uri("/api/analyses/test-id-123")
@@ -168,7 +168,7 @@ async fn update_analysis_returns_200_and_updates_notes_and_tags() {
             run_options: None,
         },
     );
-    let app = build_router(state);
+    let app = build_router(state, true);
     let body = serde_json::json!({ "notes": "my note", "tags": ["phishing", "reviewed"] });
     let req = Request::builder()
         .method("PATCH")
@@ -203,7 +203,7 @@ async fn get_status_includes_run_mode_and_analyses_count() {
 async fn get_status_docker_mode_exposes_chrome_mode() {
     let (db_tx, _) = mpsc::channel();
     let state = AppState::new(vec![], db_tx, true, true, false);
-    let app = build_router(state);
+    let app = build_router(state, true);
     let req = Request::builder()
         .uri("/api/status")
         .body(Body::empty())
@@ -217,7 +217,7 @@ async fn get_status_docker_mode_exposes_chrome_mode() {
 
 #[tokio::test]
 async fn create_analysis_returns_201_when_agent_connected() {
-    let app = build_router(test_state_with_agent());
+    let app = build_router(test_state_with_agent(), true);
     let body = serde_json::json!({ "url": "https://example.com" });
     let req = Request::builder()
         .method("POST")
@@ -235,7 +235,7 @@ async fn create_analysis_returns_201_when_agent_connected() {
 
 #[tokio::test]
 async fn create_analysis_accepts_optional_proxy_and_user_agent() {
-    let app = build_router(test_state_with_agent());
+    let app = build_router(test_state_with_agent(), true);
     let body = serde_json::json!({
         "url": "https://example.com",
         "proxy": "socks5://127.0.0.1:1080",
@@ -254,7 +254,7 @@ async fn create_analysis_accepts_optional_proxy_and_user_agent() {
 #[tokio::test]
 async fn create_analysis_stores_run_options_and_returns_them_on_get() {
     let state = test_state_with_agent();
-    let app = build_router(state.clone());
+    let app = build_router(state.clone(), true);
     let body = serde_json::json!({
         "url": "https://example.com",
         "proxy": "socks5://127.0.0.1:1080",
@@ -275,7 +275,7 @@ async fn create_analysis_stores_run_options_and_returns_them_on_get() {
     let json = get_json(res).await;
     let id = json["id"].as_str().unwrap();
 
-    let app2 = build_router(state);
+    let app2 = build_router(state, true);
     let get_req = Request::builder()
         .uri(format!("/api/analyses/{}", id))
         .body(Body::empty())
@@ -327,7 +327,7 @@ async fn list_analyses_returns_newest_first() {
             ..base
         },
     );
-    let app = build_router(state);
+    let app = build_router(state, true);
     let req = Request::builder()
         .uri("/api/analyses")
         .body(Body::empty())
@@ -361,7 +361,7 @@ async fn get_analysis_returns_200_and_body_when_exists() {
             run_options: None,
         },
     );
-    let app = build_router(state);
+    let app = build_router(state, true);
     let req = Request::builder()
         .uri("/api/analyses/get-me")
         .body(Body::empty())
@@ -394,7 +394,7 @@ async fn stop_analysis_returns_202_when_pending() {
             run_options: None,
         },
     );
-    let app = build_router(state);
+    let app = build_router(state, true);
     let req = Request::builder()
         .method("POST")
         .uri("/api/analyses/stop-me/stop")
@@ -424,7 +424,7 @@ async fn stop_analysis_returns_409_when_already_complete() {
             run_options: None,
         },
     );
-    let app = build_router(state);
+    let app = build_router(state, true);
     let req = Request::builder()
         .method("POST")
         .uri("/api/analyses/done/stop")

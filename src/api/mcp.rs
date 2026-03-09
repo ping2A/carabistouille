@@ -36,6 +36,17 @@ pub async fn mcp_handler(
         .unwrap_or("");
     let params = body.get("params").cloned().unwrap_or(Value::Null);
 
+    let tool_name: String = if method == "tools/call" {
+        params.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string()
+    } else {
+        String::new()
+    };
+    if tool_name.is_empty() {
+        tracing::info!(rpc_method = %method, rpc_id = ?id, "MCP request");
+    } else {
+        tracing::info!(rpc_method = %method, tool = %tool_name, rpc_id = ?id, "MCP request");
+    }
+
     let result = match method {
         "initialize" => handle_initialize(params),
         "tools/list" => handle_tools_list(),
@@ -48,6 +59,9 @@ pub async fn mcp_handler(
 
     match result {
         Ok(result) => {
+            if !tool_name.is_empty() {
+                tracing::info!(tool = %tool_name, rpc_id = ?id, "MCP response OK");
+            }
             let response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -56,6 +70,7 @@ pub async fn mcp_handler(
             (StatusCode::OK, Json(response)).into_response()
         }
         Err((code, message)) => {
+            tracing::warn!(rpc_method = %method, error_code = code, error = %message, rpc_id = ?id, "MCP response error");
             let response = serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use carabistouille::{build_router, AppState};
+use carabistouille::{build_mcp_router, build_router, AppState};
 use tracing_subscriber::EnvFilter;
 
 /// Simple CLI flag parser (avoids adding clap for a handful of flags).
@@ -11,8 +11,10 @@ struct CliArgs {
     clean_db: bool,
     /// Path to the SQLite database file (overrides DATABASE_PATH env).
     database: Option<PathBuf>,
-    /// Enable MCP server (POST /mcp) for LLM tools (submit URL, list/get analyses, database summary).
+    /// Enable MCP server on a separate port for LLM tools (submit URL, list/get analyses, database summary).
     mcp: bool,
+    /// Port for the MCP server when --mcp is set (default 3001). Main app stays on PORT (default 3000).
+    mcp_port: u16,
     /// Start the agent inside a Docker container instead of expecting a local agent.
     docker_agent: bool,
     /// Browser engine passed into the Docker container (puppeteer | puppeteer-extra).
@@ -62,10 +64,19 @@ fn parse_args() -> CliArgs {
         .cloned()
         .or_else(|| std::env::var("LISTEN").ok());
 
+    let mcp_port = args
+        .iter()
+        .position(|a| a == "--mcp-port")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .or_else(|| std::env::var("MCP_PORT").ok().and_then(|p| p.parse().ok()))
+        .unwrap_or(3001);
+
     CliArgs {
         clean_db,
         database,
         mcp,
+        mcp_port,
         docker_agent,
         browser_engine,
         real_chrome,
@@ -122,6 +133,11 @@ async fn resolve_tls_config() -> Option<axum_server::tls_rustls::RustlsConfig> {
 /// Initialize logging, build router, optionally start Docker agent, bind with or without TLS, and run the server.
 #[tokio::main]
 async fn main() {
+    // Required by rustls 0.23: select a process-level crypto provider before any TLS use (axum-server, reqwest).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("rustls default crypto provider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
@@ -159,7 +175,8 @@ async fn main() {
         .expect("Failed to start SQLite DB thread");
 
     let state = AppState::new(analyses, db_tx, cli.docker_agent, cli.real_chrome, cli.mcp);
-    let app = build_router(state);
+    // When MCP is enabled, serve it on a separate port; main app omits /mcp. When MCP disabled, /mcp returns 404 on main port.
+    let app = build_router(state.clone(), !cli.mcp);
 
     let addr: SocketAddr = if let Some(ref listen_str) = cli.listen {
         listen_str
@@ -176,6 +193,9 @@ async fn main() {
             .unwrap_or(3000);
         SocketAddr::new(host, port)
     };
+
+    // Resolve TLS early so the Docker agent can use wss:// when the main server uses HTTPS.
+    let tls_config = resolve_tls_config().await;
 
     // --- Docker agent management ---
     let _docker_log_handle: Option<tokio::task::JoinHandle<()>> = if cli.docker_agent {
@@ -205,6 +225,7 @@ async fn main() {
 
         match carabistouille::docker::start_container(
             addr.port(),
+            tls_config.is_some(),
             &cli.browser_engine,
             cli.real_chrome,
             cli.wireguard_config.as_deref(),
@@ -224,6 +245,22 @@ async fn main() {
         None
     };
 
+    // When MCP is enabled, run the MCP server on a separate port (plain HTTP).
+    if cli.mcp {
+        let mcp_addr = SocketAddr::new(addr.ip(), cli.mcp_port);
+        let mcp_app = build_mcp_router(state);
+        tracing::info!("MCP server listening on http://{} (POST /mcp)", mcp_addr);
+        tokio::spawn(async move {
+            let listener = tokio::net::TcpListener::bind(mcp_addr).await.unwrap();
+            axum::serve(
+                listener,
+                mcp_app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+    }
+
     // Register shutdown handler to clean up the Docker container
     let docker_agent_enabled = cli.docker_agent;
     tokio::spawn(async move {
@@ -236,7 +273,7 @@ async fn main() {
         std::process::exit(0);
     });
 
-    if let Some(tls_config) = resolve_tls_config().await {
+    if let Some(tls_config) = tls_config {
         tracing::info!("Server listening on https://{}", addr);
         axum_server::bind_rustls(addr, tls_config)
             .serve(app.into_make_service_with_connect_info::<SocketAddr>())

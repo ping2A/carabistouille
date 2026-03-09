@@ -554,7 +554,7 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Report export** — **Export PDF** opens a printable summary (URL, status, risk score, risk factors, notes, tags) in a new window so you can save as PDF.
 - **Permalink** — The current analysis is reflected in the URL (`?id=<analysis-id>`). Use **Copy link** (🔗) to share a direct link to an analysis; opening that URL selects the analysis.
 - Admin dashboard with overview of all analyses, stats, detail view, and delete (removes from server and database).
-- **MCP server (optional)** — With `--mcp`, expose a Model Context Protocol endpoint (`POST /mcp`) so LLMs can submit URLs for analysis and query the database (list analyses, get report summary). Same HTTP/HTTPS as the main server.
+- **MCP server (optional)** — With `--mcp`, run an MCP server on a **separate port** (default 3001, `POST /mcp`) so LLMs can submit URLs for analysis and query the database (list analyses, get report summary). Main app stays on port 3000.
 
 ### Infrastructure
 
@@ -650,7 +650,7 @@ If `WIREGUARD_CONFIG_PATH` is set and the file exists, the entrypoint brings up 
 
 ## TLS / HTTPS
 
-The server supports TLS natively via `rustls`. Three modes are available:
+The server supports TLS natively via `rustls` (with the ring crypto provider configured at startup). Three modes are available:
 
 ### Mode 1: No TLS (default)
 
@@ -703,7 +703,8 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 |------|-------------|
 | `--clean-db` | Delete the SQLite database file before starting (path from `--database` or `DATABASE_PATH`). Server then starts with an empty analyses list and recreates the DB on first write. |
 | `--database <path>` / `--db <path>` | Path to the SQLite database file. Overrides `DATABASE_PATH`. |
-| `--mcp` | Enable the MCP (Model Context Protocol) server at `POST /mcp` for LLM tools: submit URL for analysis, list/get analyses, database summary. Uses the same HTTP/HTTPS as the main server. |
+| `--mcp` | Enable the MCP (Model Context Protocol) server on a **separate port** (default 3001) at `POST /mcp` for LLM tools: submit URL for analysis, list/get analyses, database summary. Main app stays on `PORT` (default 3000). |
+| `--mcp-port <port>` | Port for the MCP server when `--mcp` is set (default: 3001). Overridden by `MCP_PORT`. |
 | `--docker-agent` | Run the Puppeteer agent inside a Docker container instead of a local process. The server builds the image from `agent/` and starts the container; the agent connects back via `host.docker.internal`. |
 | `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
 | `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
@@ -719,7 +720,8 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 | `HOST` | `0.0.0.0` | IP address to bind to (e.g. `127.0.0.1` for localhost only). Ignored if `LISTEN` is set. |
 | `PORT` | `3000` | Server listen port. Ignored if `LISTEN` is set. |
 | `LISTEN` | — | Full bind address `host:port` (e.g. `127.0.0.1:3000`). Overrides `HOST` and `PORT` when set. |
-| `ENABLE_MCP` | — | Set to `1` or `true` to enable the MCP server (`POST /mcp`). Same effect as `--mcp`. |
+| `ENABLE_MCP` | — | Set to `1` or `true` to enable the MCP server. Same effect as `--mcp`. |
+| `MCP_PORT` | `3001` | Port the MCP server listens on when MCP is enabled. Same host as main server. |
 | `RUST_LOG` | `carabistouille=debug` | Server log level |
 | `DATABASE_PATH` | `carabistouille.db` | Path to SQLite database file (analyses persistence). Overridden by `--database` / `--db`. |
 | `TLS_CERT` | — | Path to PEM certificate file (enables TLS) |
@@ -754,11 +756,21 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 
 ## MCP server (Model Context Protocol)
 
-When started with `--mcp` (or `ENABLE_MCP=1`), the server exposes a **Model Context Protocol** endpoint so that LLMs and MCP clients can submit URLs for analysis and query the database over HTTP/HTTPS (same as the main app).
+When started with `--mcp` (or `ENABLE_MCP=1`), the server binds the **Model Context Protocol** on a **separate port** (default 3001) so that LLMs and MCP clients can drive Carabistouille without sharing the web UI port. The main app stays on `PORT` (default 3000).
 
-**Endpoint:** `POST /mcp` — JSON-RPC 2.0. If MCP is disabled, returns 404.
+### MCP features (for LLMs)
 
-**Protocol:** Send a JSON body with `jsonrpc: "2.0"`, `id`, and `method`. Supported methods:
+- **Submit a URL for analysis** — `carabistouille_submit_url` enqueues a run in the same browser pipeline as the web UI (optional proxy / user-agent). Returns an analysis id; the run is subject to the same timeout and “Finish” behavior (LLM can poll for completion).
+- **Query the database** — `carabistouille_list_analyses` (with optional filters) and `carabistouille_get_analysis` (by id) return status, risk score, risk factors, redirect chain, phishing indicators, and other report fields. No screenshot or raw payloads in MCP responses.
+- **Database summary** — `carabistouille_database_summary` returns total count, counts by status (pending / running / complete / error), and a short list of recent analyses (url, status, risk) for quick overview.
+
+**Transport:** MCP is served on a **different port** than the main app. Default: **http://*host*:3001/mcp** (e.g. `http://localhost:3001/mcp`). Configure the port with `MCP_PORT` or `--mcp-port`. The MCP server is plain HTTP on that port; the main app can still use TLS on its own port.
+
+**Endpoint:** `POST /mcp` on the MCP port — JSON-RPC 2.0. If MCP is disabled, the main app does not expose `/mcp`.
+
+### Protocol
+
+Send a JSON body with `jsonrpc: "2.0"`, `id`, and `method`. Supported methods:
 
 | Method | Description |
 |--------|-------------|
@@ -766,7 +778,7 @@ When started with `--mcp` (or `ENABLE_MCP=1`), the server exposes a **Model Cont
 | `tools/list` | Returns the list of available tools and their input schemas. |
 | `tools/call` | Invoke a tool by `name` with `arguments` (object). Returns `content: [{ type: "text", text: "..." }]`. |
 
-**Tools:**
+### Tools
 
 | Tool | Description | Arguments |
 |------|-------------|-----------|
@@ -775,4 +787,10 @@ When started with `--mcp` (or `ENABLE_MCP=1`), the server exposes a **Model Cont
 | `carabistouille_get_analysis` | Get one analysis by id: status, URL, report summary (risk score, risk factors, redirects, phishing indicators, etc.). | `id` (required) |
 | `carabistouille_database_summary` | Summary of the database: total count, counts by status, and recent analyses (url, status, risk). | — |
 
-**Example (with TLS):** Use the same base URL as the web UI (e.g. `https://localhost:3000/mcp`). The MCP client must send `POST /mcp` with a JSON-RPC body; no extra path or transport is required beyond the main server HTTP/HTTPS.
+### Example workflow
+
+1. `initialize` — establish protocol version and capabilities.
+2. `tools/list` — discover tools.
+3. `tools/call` with `carabistouille_submit_url` and `arguments: { "url": "https://example.com" }` — get back an analysis id.
+4. Optionally poll with `tools/call` and `carabistouille_get_analysis` with that id until status is `complete` (or `error`), then read risk score and factors from the returned text.
+5. Or call `carabistouille_list_analyses` / `carabistouille_database_summary` to inspect existing analyses without submitting a new URL.

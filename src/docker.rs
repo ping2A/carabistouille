@@ -82,11 +82,13 @@ pub async fn ensure_image(agent_dir: &std::path::Path) -> Result<(), String> {
 
 /// Start the agent container (removes any stale container first).
 /// `server_port` is the host port the server listens on.
+/// `use_tls`: if true, the main server uses HTTPS, so the agent must connect with wss://.
 /// `browser_engine` selects puppeteer or puppeteer-extra inside the container.
 /// `real_chrome`: if true, run Chrome in headed mode (HEADLESS=false) with Xvfb for a more realistic browser.
 /// `wireguard_config`: if Some(path), mount the WireGuard config and run with NET_ADMIN so all traffic goes through the VPN.
 pub async fn start_container(
     server_port: u16,
+    use_tls: bool,
     browser_engine: &str,
     real_chrome: bool,
     wireguard_config: Option<&std::path::Path>,
@@ -100,7 +102,8 @@ pub async fn start_container(
         .status()
         .await;
 
-    let server_url = format!("ws://host.docker.internal:{server_port}/ws/agent");
+    let scheme = if use_tls { "wss" } else { "ws" };
+    let server_url = format!("{scheme}://host.docker.internal:{server_port}/ws/agent");
 
     tracing::info!(
         "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={}, wireguard={})",
