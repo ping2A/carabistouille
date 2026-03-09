@@ -11,6 +11,8 @@ struct CliArgs {
     clean_db: bool,
     /// Path to the SQLite database file (overrides DATABASE_PATH env).
     database: Option<PathBuf>,
+    /// Enable MCP server (POST /mcp) for LLM tools (submit URL, list/get analyses, database summary).
+    mcp: bool,
     /// Start the agent inside a Docker container instead of expecting a local agent.
     docker_agent: bool,
     /// Browser engine passed into the Docker container (puppeteer | puppeteer-extra).
@@ -27,6 +29,8 @@ struct CliArgs {
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let clean_db = args.iter().any(|a| a == "--clean-db");
+    let mcp = args.iter().any(|a| a == "--mcp")
+        || std::env::var("ENABLE_MCP").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
     let database = args
         .iter()
         .position(|a| a == "--database" || a == "--db")
@@ -61,6 +65,7 @@ fn parse_args() -> CliArgs {
     CliArgs {
         clean_db,
         database,
+        mcp,
         docker_agent,
         browser_engine,
         real_chrome,
@@ -153,7 +158,7 @@ async fn main() {
     let (db_tx, _db_handle) = carabistouille::db::run_db_thread(&db_path)
         .expect("Failed to start SQLite DB thread");
 
-    let state = AppState::new(analyses, db_tx, cli.docker_agent, cli.real_chrome);
+    let state = AppState::new(analyses, db_tx, cli.docker_agent, cli.real_chrome, cli.mcp);
     let app = build_router(state);
 
     let addr: SocketAddr = if let Some(ref listen_str) = cli.listen {

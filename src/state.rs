@@ -29,16 +29,20 @@ pub struct AppState {
     pub analysis_timeouts: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     /// Channel to send persistence ops to the SQLite thread. Fire-and-forget; failures are logged in the DB thread.
     pub db_tx: Arc<std::sync::mpsc::Sender<DbOp>>,
+    /// When true, POST /mcp is enabled for MCP (Model Context Protocol) JSON-RPC.
+    pub mcp_enabled: bool,
 }
 
 impl AppState {
     /// Create new state: preload analyses into the map, broadcast channel for agent commands, no viewers, no timeouts, DB sender.
     /// When docker_agent is true, run_mode/chrome_mode are exposed in /api/status.
+    /// When mcp_enabled is true, POST /mcp serves MCP JSON-RPC for LLM tools.
     pub fn new(
         analyses: Vec<Analysis>,
         db_tx: std::sync::mpsc::Sender<DbOp>,
         docker_agent: bool,
         real_chrome: bool,
+        mcp_enabled: bool,
     ) -> Self {
         let (agent_cmd_tx, _) = broadcast::channel(1024);
         let analyses_map = Arc::new(DashMap::new());
@@ -54,6 +58,7 @@ impl AppState {
             real_chrome,
             analysis_timeouts: Arc::new(DashMap::new()),
             db_tx: Arc::new(db_tx),
+            mcp_enabled,
         }
     }
 

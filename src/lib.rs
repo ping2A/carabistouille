@@ -44,6 +44,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/analyses/:id/virustotal",
             get(api::routes::get_virustotal),
         )
+        .route("/mcp", post(api::mcp::mcp_handler))
         .route("/ws/agent", get(api::ws::agent_ws_handler))
         .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler))
         .fallback_service(ServeDir::new("web"))

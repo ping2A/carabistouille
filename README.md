@@ -554,10 +554,11 @@ With the agent’s flags and stealth patches, this kind of flow is much less lik
 - **Report export** — **Export PDF** opens a printable summary (URL, status, risk score, risk factors, notes, tags) in a new window so you can save as PDF.
 - **Permalink** — The current analysis is reflected in the URL (`?id=<analysis-id>`). Use **Copy link** (🔗) to share a direct link to an analysis; opening that URL selects the analysis.
 - Admin dashboard with overview of all analyses, stats, detail view, and delete (removes from server and database).
+- **MCP server (optional)** — With `--mcp`, expose a Model Context Protocol endpoint (`POST /mcp`) so LLMs can submit URLs for analysis and query the database (list analyses, get report summary). Same HTTP/HTTPS as the main server.
 
 ### Infrastructure
 
-- **SQLite persistence** — Analyses are saved to a local SQLite database and loaded on server restart. Database path is configurable via `DATABASE_PATH`.
+- **SQLite persistence** — Analyses are saved to a local SQLite database and loaded on server restart. Database path is configurable via `DATABASE_PATH`. Each analysis stores report data, last screenshot, and screenshot timeline, so the database grows with use; delete analyses (UI or admin) to free space.
 - **TLS / HTTPS** — Native rustls support with self-signed certs for dev or custom certs for production.
 - **Report snapshots** — Viewer WebSocket connections receive all accumulated data on connect, preventing missed events.
 - **Configurable agent** — Centralized `config.js` for headless mode, viewport, Chromium flags, navigation strategies, and screenshot settings.
@@ -586,6 +587,8 @@ docker compose up
 ```
 
 Then open [http://localhost:3000](http://localhost:3000). The SQLite database is stored in a named volume `carabistouille-data` so analyses persist across restarts.
+
+**Disk usage:** Growth can come from two places. **(1) Application data:** Each analysis stores the full report (network requests, scripts, raw files, page source, DOM), the last screenshot, and a screenshot timeline (one frame every 3 s). The database and Docker volume grow with every new analysis. Delete old analyses from the analyst UI or the [admin dashboard](http://localhost:3000/admin.html) to free space; use `sqlite3 … VACUUM` (app stopped) to shrink the DB file; use `docker compose down -v` to remove the volume and all analyses. **(2) Docker agent images:** When you run the server with `--docker-agent`, it builds the agent image (`carabistouille-agent`) on each start (unless `SKIP_AGENT_BUILD=1`). Each build leaves the previous image as a dangling image, so disk can grow even if you delete analyses. Remove dangling images with `docker image prune` (or `docker system prune` for a broader cleanup). The agent **container** is reused by name and removed on start/stop, so containers do not accumulate.
 
 **Using Docker only:**
 
@@ -700,6 +703,7 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 |------|-------------|
 | `--clean-db` | Delete the SQLite database file before starting (path from `--database` or `DATABASE_PATH`). Server then starts with an empty analyses list and recreates the DB on first write. |
 | `--database <path>` / `--db <path>` | Path to the SQLite database file. Overrides `DATABASE_PATH`. |
+| `--mcp` | Enable the MCP (Model Context Protocol) server at `POST /mcp` for LLM tools: submit URL for analysis, list/get analyses, database summary. Uses the same HTTP/HTTPS as the main server. |
 | `--docker-agent` | Run the Puppeteer agent inside a Docker container instead of a local process. The server builds the image from `agent/` and starts the container; the agent connects back via `host.docker.internal`. |
 | `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
 | `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
@@ -715,6 +719,7 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 | `HOST` | `0.0.0.0` | IP address to bind to (e.g. `127.0.0.1` for localhost only). Ignored if `LISTEN` is set. |
 | `PORT` | `3000` | Server listen port. Ignored if `LISTEN` is set. |
 | `LISTEN` | — | Full bind address `host:port` (e.g. `127.0.0.1:3000`). Overrides `HOST` and `PORT` when set. |
+| `ENABLE_MCP` | — | Set to `1` or `true` to enable the MCP server (`POST /mcp`). Same effect as `--mcp`. |
 | `RUST_LOG` | `carabistouille=debug` | Server log level |
 | `DATABASE_PATH` | `carabistouille.db` | Path to SQLite database file (analyses persistence). Overridden by `--database` / `--db`. |
 | `TLS_CERT` | — | Path to PEM certificate file (enables TLS) |
@@ -746,3 +751,28 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 | `/ws/agent` | Agent -> Server | Events: screenshot, network_request_captured, console_log_captured, redirect_detected, script_loaded, navigation_complete, raw_file_captured, page_source_captured, clipboard_captured, analysis_complete, element_info, error, agent_ready. *network_request_captured* carries full request/response metadata (headers, payload, timing, TLS, initiator, failure). |
 | `/ws/viewer/:id` | Viewer -> Server | Commands: click, scroll, mousemove, type_text, keypress, inspect, stop_analysis |
 | `/ws/viewer/:id` | Server -> Viewer | All agent events forwarded + report_snapshot on connect + screenshot_timeline_available notification |
+
+## MCP server (Model Context Protocol)
+
+When started with `--mcp` (or `ENABLE_MCP=1`), the server exposes a **Model Context Protocol** endpoint so that LLMs and MCP clients can submit URLs for analysis and query the database over HTTP/HTTPS (same as the main app).
+
+**Endpoint:** `POST /mcp` — JSON-RPC 2.0. If MCP is disabled, returns 404.
+
+**Protocol:** Send a JSON body with `jsonrpc: "2.0"`, `id`, and `method`. Supported methods:
+
+| Method | Description |
+|--------|-------------|
+| `initialize` | Handshake; returns protocol version and server capabilities (tools). |
+| `tools/list` | Returns the list of available tools and their input schemas. |
+| `tools/call` | Invoke a tool by `name` with `arguments` (object). Returns `content: [{ type: "text", text: "..." }]`. |
+
+**Tools:**
+
+| Tool | Description | Arguments |
+|------|-------------|-----------|
+| `carabistouille_submit_url` | Submit a URL for analysis. Returns analysis id and status; use `carabistouille_get_analysis` to poll for completion and report. | `url` (required), optional `proxy`, `user_agent` |
+| `carabistouille_list_analyses` | List analyses (newest first). | Optional `limit` (default 20), `status` (pending \| running \| complete \| error) |
+| `carabistouille_get_analysis` | Get one analysis by id: status, URL, report summary (risk score, risk factors, redirects, phishing indicators, etc.). | `id` (required) |
+| `carabistouille_database_summary` | Summary of the database: total count, counts by status, and recent analyses (url, status, risk). | — |
+
+**Example (with TLS):** Use the same base URL as the web UI (e.g. `https://localhost:3000/mcp`). The MCP client must send `POST /mcp` with a JSON-RPC body; no extra path or transport is required beyond the main server HTTP/HTTPS.
