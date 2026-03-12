@@ -12,6 +12,9 @@ const config = {
   },
 
   browser: {
+    // When set (e.g. docker:lightpanda), connect to existing CDP browser instead of launching.
+    browserWSEndpoint: process.env.BROWSER_WS_ENDPOINT || null,
+
     // 'new' = new headless (Chrome for Testing, realistic fingerprint)
     // 'shell' = old headless (legacy, easily fingerprinted)
     // false   = headed / "real" Chrome (needs a display; in Docker use Xvfb + HEADLESS=false)

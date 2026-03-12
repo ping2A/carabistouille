@@ -30,6 +30,7 @@ cd carabistouille
 | **A. Local** | On your machine | On your machine | Development, full control |
 | **B. Docker Compose** | In container | In same container | One-command run, no local Node |
 | **C. Docker agent only** | On your machine | In container | Real Chrome in container, server on host |
+| **D. Baliverne agent** | On your machine | Docker Chrome per analysis (X11, WebRTC) | Full Neko-style stack: dummy X11, xtest-injector, WebRTC video, STUN/TURN |
 
 ### 4. Run (pick one)
 
@@ -64,16 +65,46 @@ cd carabistouille
 
 1. From the project root (Docker must be in PATH, e.g. run from a terminal):
    ```bash
-   cargo run --release -- --docker-agent --real-chrome
+   cargo run --release -- --agent docker:real
    ```
-   This builds the agent image, starts the container, and runs the server. The agent runs Chrome in headed mode (Xvfb) inside the container.
+   This builds the agent image, starts the container, and runs the server. The agent runs Chrome in headed mode (Xvfb) inside the container. Use `--agent docker` for headless, or `--agent docker:puppeteer:real` for puppeteer (non-extra) with real Chrome.
 
 2. If you see *Docker not found*, build the image once in a terminal where `docker` works, then skip the build:
    ```bash
    cd agent && docker build --platform linux/amd64 -t carabistouille-agent . && cd ..
-   SKIP_AGENT_BUILD=1 cargo run --release -- --docker-agent --real-chrome
+   SKIP_AGENT_BUILD=1 cargo run --release -- --agent docker:real
    ```
 3. Open [http://localhost:3000](http://localhost:3000).
+
+**Option D — Baliverne agent (Docker Chrome/Firefox, X11 dummy driver, WebRTC)**
+
+Uses the integrated [Baliverne](https://github.com/ping2A/baliverne) stack: one Docker container per analysis, with dummy X11 driver, Neko-style input (xtest-injector / xf86-input-neko), and WebRTC video (VP8/H264 RTP, STUN/TURN). No built-in agent needed.
+
+1. **Build the Baliverne browser images** (once; from project root):
+   ```bash
+   # Build base + Chrome + Firefox (recommended)
+   ./scripts/build-baliverne.sh
+
+   # Or build only Chrome, or only Firefox, or only base:
+   ./scripts/build-baliverne.sh chrome
+   ./scripts/build-baliverne.sh firefox
+   ./scripts/build-baliverne.sh base
+
+   # Clean rebuild (stops containers, removes images, then rebuilds):
+   ./scripts/rebuild-chrome.sh    # base + Chrome
+   ./scripts/rebuild-firefox.sh   # base + Firefox
+   ```
+   By default images are built for `linux/amd64`. On Apple Silicon you can set `PLATFORM=linux/arm64` for Firefox; Chrome requires amd64 (set by default in the scripts).
+
+2. **Start the server with Baliverne agent:**
+   ```bash
+   cargo run -- --agent baliverne --listen 0.0.0.0:3000
+   ```
+   Containers must reach the server; use `0.0.0.0` so they can use `host.docker.internal:3000`. Optional: set `BALIVERNE_PUBLIC_HOST=host.docker.internal:3000` if needed.
+
+3. **Open** [http://localhost:3000](http://localhost:3000). Create an analysis as usual; each analysis starts a new Chrome container. Use **GET /api/webrtc-ice-servers** if your viewer uses WebRTC (STUN/TURN).
+
+4. **Optional:** STUN (default 0.0.0.0:3478) and TURN (e.g. `--turn-bind 0.0.0.0:3479 --turn-public-ip YOUR_IP`) are started when Baliverne is enabled. See env vars in [Configuration](#configuration).
 
 ### 5. Use the app
 
@@ -84,8 +115,8 @@ cd carabistouille
 ### 6. Optional next steps
 
 - **TLS / HTTPS:** see [TLS / HTTPS](#tls--https) (e.g. `TLS_SELF_SIGNED=true cargo run`).
-- **WireGuard VPN:** see [WireGuard VPN output](#wireguard-vpn-output) and use `--wireguard-config /path/to/wg0.conf` with `--docker-agent`.
-- **CLI flags:** `--clean-db`, `--database` / `--db`, `--listen`, `--browser-engine` — see [Configuration](#configuration) and the flags table.
+- **WireGuard VPN:** see [WireGuard VPN output](#wireguard-vpn-output) and use `--wireguard-config /path/to/wg0.conf` with `--agent docker` (or `docker:real`).
+- **CLI flags:** `--clean-db`, `--database` / `--db`, `--listen`, `--agent` — see [Configuration](#configuration) and the flags table.
 
 ## Architecture Overview
 
@@ -575,7 +606,7 @@ See **[Setup and run (step-by-step)](#setup-and-run-step-by-step)** for the full
 
 - **Local:** `cargo run` (terminal 1), then `cd agent && npm install && npm start` (terminal 2). Open [http://localhost:3000](http://localhost:3000).
 - **Docker Compose:** `docker compose up` from project root, then [http://localhost:3000](http://localhost:3000).
-- **Agent in Docker:** `cargo run --release -- --docker-agent --real-chrome` from project root (requires Docker in PATH).
+- **Agent in Docker:** `cargo run --release -- --agent docker:real` from project root (requires Docker in PATH).
 
 ## Docker
 
@@ -590,7 +621,7 @@ docker compose up
 
 Then open [http://localhost:3000](http://localhost:3000). The SQLite database is stored in a named volume `carabistouille-data` so analyses persist across restarts.
 
-**Disk usage:** Growth can come from two places. **(1) Application data:** Each analysis stores the full report (network requests, scripts, raw files, page source, DOM), the last screenshot, and a screenshot timeline (one frame every 3 s). The database and Docker volume grow with every new analysis. Delete old analyses from the analyst UI or the [admin dashboard](http://localhost:3000/admin.html) to free space; use `sqlite3 … VACUUM` (app stopped) to shrink the DB file; use `docker compose down -v` to remove the volume and all analyses. **(2) Docker agent images:** When you run the server with `--docker-agent`, it builds the agent image (`carabistouille-agent`) on each start (unless `SKIP_AGENT_BUILD=1`). Each build leaves the previous image as a dangling image, so disk can grow even if you delete analyses. Remove dangling images with `docker image prune` (or `docker system prune` for a broader cleanup). The agent **container** is reused by name and removed on start/stop, so containers do not accumulate.
+**Disk usage:** Growth can come from two places. **(1) Application data:** Each analysis stores the full report (network requests, scripts, raw files, page source, DOM), the last screenshot, and a screenshot timeline (one frame every 3 s). The database and Docker volume grow with every new analysis. Delete old analyses from the analyst UI or the [admin dashboard](http://localhost:3000/admin.html) to free space; use `sqlite3 … VACUUM` (app stopped) to shrink the DB file; use `docker compose down -v` to remove the volume and all analyses. **(2) Docker agent images:** When you run the server with `--agent docker` (or `docker:real`), it builds the agent image (`carabistouille-agent`) on each start (unless `SKIP_AGENT_BUILD=1`). Each build leaves the previous image as a dangling image, so disk can grow even if you delete analyses. Remove dangling images with `docker image prune` (or `docker system prune` for a broader cleanup). The agent **container** is reused by name and removed on start/stop, so containers do not accumulate.
 
 **Using Docker only:**
 
@@ -612,11 +643,11 @@ docker run --rm -p 3000:3000 -v carabistouille-data:/data carabistouille
 
 Mount a volume at `/data` to persist the database. The image uses system Chromium and the existing agent config (including `--no-sandbox` for Docker).
 
-**Agent-only in Docker (server on host):** Run the server on your machine and the agent in a container with `cargo run -- --docker-agent`. Add `--real-chrome` to run Chrome in headed mode (non-headless) inside the container using Xvfb for a more realistic browser and better anti-detection. Run from the project root so the `agent` directory is found. If you see *Docker not found*, ensure Docker Desktop is running and `docker` is in your PATH (e.g. run from a terminal where `docker` works). To build the image manually (e.g. from a terminal where `docker` is available) and then skip the build when starting the server:
+**Agent-only in Docker (server on host):** Run the server on your machine and the agent in a container with `cargo run -- --agent docker`. Use `--agent docker:real` to run Chrome in headed mode (non-headless) inside the container using Xvfb for a more realistic browser and better anti-detection. Run from the project root so the `agent` directory is found. If you see *Docker not found*, ensure Docker Desktop is running and `docker` is in your PATH (e.g. run from a terminal where `docker` works). To build the image manually (e.g. from a terminal where `docker` is available) and then skip the build when starting the server:
 
 ```bash
 cd agent && docker build --platform linux/amd64 -t carabistouille-agent . && cd ..
-SKIP_AGENT_BUILD=1 cargo run --release -- --docker-agent --real-chrome
+SKIP_AGENT_BUILD=1 cargo run --release -- --agent docker:real
 ```
 
 ### WireGuard VPN output
@@ -640,10 +671,10 @@ services:
       - /path/on/host/wg0.conf:/etc/wireguard/wg0.conf:ro
 ```
 
-**Agent-only container (`--docker-agent`):** Pass the path to your WireGuard config on the host; the server will mount it and run the container with `NET_ADMIN`:
+**Agent-only container (`--agent docker`):** Pass the path to your WireGuard config on the host; the server will mount it and run the container with `NET_ADMIN`:
 
 ```bash
-cargo run -- --docker-agent --wireguard-config /path/to/wg0.conf
+cargo run -- --agent docker --wireguard-config /path/to/wg0.conf
 ```
 
 Or use the environment variable: `WIREGUARD_CONFIG_PATH=/path/to/wg0.conf`.
@@ -707,13 +738,13 @@ SERVER_URL=wss://your-server:3000/ws/agent TLS_REJECT_UNAUTHORIZED=true npm star
 | `--database <path>` / `--db <path>` | Path to the SQLite database file. Overrides `DATABASE_PATH`. |
 | `--mcp` | Enable the MCP (Model Context Protocol) server on a **separate port** (default 3001) at `POST /mcp` for LLM tools: submit URL for analysis, list/get analyses, database summary. Main app stays on `PORT` (default 3000). |
 | `--mcp-port <port>` | Port for the MCP server when `--mcp` is set (default: 3001). Overridden by `MCP_PORT`. |
-| `--docker-agent` | Run the Puppeteer agent inside a Docker container instead of a local process. The server builds the image from `agent/` and starts the container; the agent connects back via `host.docker.internal`. |
-| `--real-chrome` | When used with `--docker-agent`: run Chrome in **headed mode** (non-headless) with a virtual display (Xvfb). Behaves like a real browser and is harder for sites to detect as headless. Uses more resources. |
-| `--browser-engine <name>` | Browser engine for the Docker agent: `puppeteer` or `puppeteer-extra` (default: `puppeteer-extra`). |
-| `--wireguard-config <path>` | When used with `--docker-agent`: mount this WireGuard config so all agent (browser) traffic goes through the VPN. Requires host path to a `.conf` file. |
+| `--agent <name>` | Which agent to use: `local` (default), `docker`, `docker:real`, `docker:lightpanda`, or `baliverne`. For Baliverne you can add `:chrome`, `:firefox`, and/or a codec: `baliverne:chrome`, `baliverne:firefox`, `baliverne:h264`, `baliverne:chrome:h264`, etc. `baliverne` = one Docker Chrome or Firefox per analysis with X11 dummy driver, WebRTC, STUN/TURN. |
+| `--baliverne-codec <codec>` | When using `--agent baliverne`: WebRTC video codec (`vp8`, `vp9`, `h264`, `av1`). Overridden by codec in `--agent baliverne:CODEC`. Can also set `BALIVERNE_VIDEO_CODEC`. |
+| `--baliverne-browser <browser>` | When using `--agent baliverne`: browser to use (`chrome`, `firefox`). Overridden by browser in `--agent baliverne:BROWSER`. Can also set `BALIVERNE_BROWSER`. |
+| `--wireguard-config <path>` | When using `--agent docker` (or variants): mount this WireGuard config so all agent (browser) traffic goes through the VPN. Requires host path to a `.conf` file. |
 | `--listen <addr>` | Bind address in `host:port` form (e.g. `127.0.0.1:3000` or `0.0.0.0:8080`). Overrides `HOST` and `PORT`. |
 
-Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to bind to localhost on port 8080, `./carabistouille --docker-agent --real-chrome`, or `./carabistouille --docker-agent --wireguard-config /path/to/wg0.conf` to route all browser traffic through a WireGuard VPN.
+Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080`, `cargo run -- --agent docker:real`, or `cargo run -- --agent docker --wireguard-config /path/to/wg0.conf` to route browser traffic through a WireGuard VPN.
 
 ### Environment variables
 
@@ -733,12 +764,15 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 | `TLS_REJECT_UNAUTHORIZED` | `false` | Agent: reject invalid TLS certs (set `true` for production) |
 | `WIREGUARD_CONFIG_PATH` | — | Path to WireGuard config file; when set, the agent/container brings up the interface so all browser traffic goes through the VPN (Docker: use with `cap_add: [NET_ADMIN]` and mount the config). |
 | `VIRUSTOTAL_API_KEY` | — | VirusTotal API key for URL reputation checks. Optional if users set the key in the UI (Settings). When “Check VirusTotal” is used, the server uses the key from the request header (from UI) or this env var. Get a key at [virustotal.com](https://www.virustotal.com/gui/my-apikey). |
+| `AGENT` | `local` | Same as `--agent`. Use `docker`, `docker:real`, or `baliverne`. |
+| `BALIVERNE_*` | — | When Baliverne is enabled: `BALIVERNE_PUBLIC_HOST`, `BALIVERNE_BROWSER` (chrome/firefox), `BALIVERNE_CHROME_IMAGE`, `BALIVERNE_FIREFOX_IMAGE`, `BALIVERNE_STUN_BIND`, `BALIVERNE_TURN_*`, `BALIVERNE_VIDEO_CODEC`, `BALIVERNE_RTP_FPS`, etc. See `src/baliverne/config.rs`. |
 
 ## REST API
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/api/status` | Agent connection status + analysis count |
+| `GET` | `/api/status` | Agent connection status, `agent_backend` (`builtin` or `baliverne`), and analysis count |
+| `GET` | `/api/webrtc-ice-servers` | (When Baliverne is enabled) ICE servers for WebRTC (STUN/TURN). Use in viewer for WebRTC video. |
 | `POST` | `/api/analyses` | Submit URL for analysis (accepts `url`, optional `proxy`, `user_agent`, `viewport_width`, `viewport_height`, `device_scale_factor`, `is_mobile`, `network_throttling`, and geo/locale fields) |
 | `GET` | `/api/analyses` | List all analyses (sorted newest first) |
 | `GET` | `/api/analyses/:id` | Get analysis details + report (includes last screenshot for completed). Response includes `run_options` when the analysis was created with overrides: proxy, user_agent, viewport, network_throttling, timezone, locale, geo. |
@@ -751,7 +785,8 @@ Examples: `cargo run -- --clean-db`, `cargo run -- --listen 127.0.0.1:8080` to b
 
 | Endpoint | Direction | Description |
 |----------|-----------|-------------|
-| `/ws/agent` | Server -> Agent | Commands: navigate (url, proxy, user_agent), click, scroll, move_mouse, type_text, key_press, inspect_element, stop_analysis |
+| `/ws/agent` | Server -> Agent | Commands: navigate (url, proxy, user_agent), click, scroll, move_mouse, type_text, key_press, inspect_element, stop_analysis (built-in agent only) |
+| `/ws/session/:session_id` | Runtime -> Server | Baliverne container runtime connects here; receives commands, sends events (one session per analysis when using Baliverne agent). |
 | `/ws/agent` | Agent -> Server | Events: screenshot, network_request_captured, console_log_captured, redirect_detected, script_loaded, navigation_complete, raw_file_captured, page_source_captured, clipboard_captured, analysis_complete, element_info, error, agent_ready. *network_request_captured* carries full request/response metadata (headers, payload, timing, TLS, initiator, failure). |
 | `/ws/viewer/:id` | Viewer -> Server | Commands: click, scroll, mousemove, type_text, keypress, inspect, stop_analysis |
 | `/ws/viewer/:id` | Server -> Viewer | All agent events forwarded + report_snapshot on connect + screenshot_timeline_available notification |

@@ -9,7 +9,7 @@ use tower::ServiceExt;
 /// Build app state for tests: empty analyses, dummy DB channel (sends are no-op), local mode.
 fn test_state() -> AppState {
     let (db_tx, _) = mpsc::channel();
-    AppState::new(vec![], db_tx, false, false, false)
+    AppState::new(vec![], db_tx, false, false, false, None, None, None)
 }
 
 /// Build app state with agent marked connected (for create_analysis success path).
@@ -204,7 +204,7 @@ async fn get_status_includes_run_mode_and_analyses_count() {
 #[tokio::test]
 async fn get_status_docker_mode_exposes_chrome_mode() {
     let (db_tx, _) = mpsc::channel();
-    let state = AppState::new(vec![], db_tx, true, true, false);
+    let state = AppState::new(vec![], db_tx, true, true, false, None, None, None);
     let app = build_router(state, true);
     let req = Request::builder()
         .uri("/api/status")

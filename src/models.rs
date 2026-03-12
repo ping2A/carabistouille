@@ -70,6 +70,33 @@ pub struct Analysis {
     pub submitted_via_mcp: bool,
 }
 
+/// Lightweight list item for GET /api/analyses: no report/screenshot payload, only summary fields for overview and filters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisListItem {
+    pub id: String,
+    pub url: String,
+    pub status: AnalysisStatus,
+    pub created_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// From report when present; None if no report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_score: Option<u32>,
+    #[serde(default)]
+    pub network_request_count: u32,
+    #[serde(default)]
+    pub scripts_count: u32,
+    #[serde(default)]
+    pub redirect_count: u32,
+    #[serde(default)]
+    pub has_clipboard: bool,
+    #[serde(default)]
+    pub has_mixed_content: bool,
+}
+
 /// Lifecycle state of an analysis (pending → running → complete | error).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]

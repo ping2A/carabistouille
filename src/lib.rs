@@ -1,5 +1,6 @@
 //! Carabistouille library: router builder and shared state for the URL analyzer server.
 
+pub mod baliverne;
 mod api;
 pub mod db;
 pub mod docker;
@@ -51,8 +52,15 @@ pub fn build_router(state: AppState, include_mcp_route: bool) -> Router {
     }
     app = app
         .route("/ws/agent", get(api::ws::agent_ws_handler))
-        .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler))
-        .fallback_service(ServeDir::new("web"));
+        .route("/ws/viewer/:id", get(api::ws::viewer_ws_handler));
+    if state.baliverne.is_some() {
+        let baliverne_routes: axum::Router<AppState> = baliverne::ws::ws_router(state.clone());
+        app = app.merge(baliverne_routes).route(
+            "/api/webrtc-ice-servers",
+            axum::routing::get(baliverne::api::ice::webrtc_ice_servers_handler),
+        );
+    }
+    app = app.fallback_service(ServeDir::new("web"));
 
     app.layer(CorsLayer::permissive())
         .layer(

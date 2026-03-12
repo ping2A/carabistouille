@@ -1,0 +1,15 @@
+{
+  "name": "baliverne-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser runtime for Baliverne; connects to server and runs Chrome or Firefox",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^23.0.0",
+    "playwright": "^1.49.0",
+    "ws": "^8.18.0"
+  }
+}

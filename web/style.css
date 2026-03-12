@@ -202,6 +202,46 @@ header h1 {
   color: var(--accent);
 }
 
+.connection-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.connection-stats-bytes {
+  white-space: nowrap;
+}
+
+.connection-stats-quality {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.connection-stats-quality.quality-good {
+  background: rgba(34, 197, 94, 0.2);
+  color: var(--success);
+}
+
+.connection-stats-quality.quality-fair {
+  background: rgba(234, 179, 8, 0.2);
+  color: #eab308;
+}
+
+.connection-stats-quality.quality-poor {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--danger);
+}
+
+.sidebar-connection-stats {
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
 /* Main layout */
 main {
   display: flex;
@@ -232,6 +272,73 @@ main {
 .submit-section {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.network-stream-section {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.network-stream-section h2 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+  padding: 0 16px;
+}
+
+.network-graph {
+  padding: 8px 16px;
+  margin-bottom: 10px;
+}
+
+.network-graph-svg {
+  width: 100%;
+  max-width: 280px;
+  height: auto;
+  display: block;
+  margin: 0 auto;
+}
+
+.network-node {
+  fill: var(--bg-tertiary);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.network-node-label {
+  fill: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.network-edge-label {
+  fill: var(--text-tertiary);
+  font-size: 9px;
+}
+
+.stream-info {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  padding: 0 16px;
+  font-size: 12px;
+}
+
+.stream-info dt {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.stream-info dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+
+.stream-info dd.stream-ice-list {
+  word-break: break-all;
+  font-size: 11px;
 }
 
 #url-form {
@@ -685,6 +792,82 @@ main {
   cursor: crosshair;
   user-select: none;
   -webkit-user-drag: none;
+}
+
+/* Baliverne-style WebRTC viewport: same layout as Baliverne (stream-wrap + video fill, waiting message). */
+.viewport-webrtc {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: #000;
+  overflow: auto;
+  min-height: 0;
+}
+
+/* Baliverne-style: video hidden until stream is attached, then display block and on top */
+.viewport-video {
+  position: absolute;
+  top: 1rem;
+  left: 1rem;
+  right: 1rem;
+  bottom: 1rem;
+  max-width: calc(100% - 2rem);
+  max-height: calc(100% - 2rem);
+  margin: auto;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: crosshair;
+  background: #0f0f14;
+  border-radius: 4px;
+  user-select: none;
+  -webkit-user-drag: none;
+  display: none;
+  z-index: 0;
+}
+
+.viewport-video.has-stream {
+  display: block;
+  z-index: 2;
+}
+
+.viewport-webrtc-waiting {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-tertiary);
+  text-align: center;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.viewport-webrtc-waiting strong {
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 1rem;
+}
+
+.viewport-webrtc-waiting span {
+  font-size: 0.875rem;
+}
+
+.viewport-webrtc-placeholder {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  background: rgba(0, 0, 0, 0.7);
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .inspect-highlight {

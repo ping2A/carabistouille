@@ -1,3 +1,6 @@
+[workspace]
+members = ["xtest-injector"]
+
 [package]
 name = "carabistouille"
 version = "0.1.0"
@@ -5,23 +8,33 @@ edition = "2021"
 description = "Malicious URL analyzer with remote browser instrumentation"
 
 [dependencies]
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["ws", "json", "macros"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 tower-http = { version = "0.5", features = ["cors", "fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dashmap = "6"
 futures = "0.3"
+futures-util = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rcgen = "0.14"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# Baliverne agent (Docker sessions, WebRTC, STUN/TURN, X11 dummy driver)
+bollard = "0.17"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+turn = "0.17"
+webrtc-util = "0.17"
+webrtc = "0.17"
+rtp = "0.17"
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

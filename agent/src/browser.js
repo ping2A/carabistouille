@@ -47,20 +47,27 @@ export class BrowserManager {
     const width = options?.viewport_width ?? options?.viewportWidth ?? this.viewportWidth;
     const height = options?.viewport_height ?? options?.viewportHeight ?? this.viewportHeight;
 
-    const args = [
-      ...config.browser.args,
-      `--window-size=${width},${height}`,
-    ];
-
-    if (proxy) {
-      args.push(`--proxy-server=${proxy}`);
+    let browser;
+    const wsEndpoint = config.browser.browserWSEndpoint;
+    if (wsEndpoint) {
+      browser = await launcher.connect({
+        browserWSEndpoint: wsEndpoint,
+        ignoreHTTPSErrors: config.browser.ignoreHTTPSErrors,
+      });
+    } else {
+      const args = [
+        ...config.browser.args,
+        `--window-size=${width},${height}`,
+      ];
+      if (proxy) {
+        args.push(`--proxy-server=${proxy}`);
+      }
+      browser = await launcher.launch({
+        headless: config.browser.headless,
+        args,
+        ignoreHTTPSErrors: config.browser.ignoreHTTPSErrors,
+      });
     }
-
-    const browser = await launcher.launch({
-      headless: config.browser.headless,
-      args,
-      ignoreHTTPSErrors: config.browser.ignoreHTTPSErrors,
-    });
     const page = await browser.newPage();
 
     if (userAgent) {
@@ -99,7 +106,7 @@ export class BrowserManager {
     await this.installDetectionMonitors(page);
 
     const engine = useExtraStealth ? 'puppeteer-extra' : 'puppeteer';
-    const headlessLabel = config.browser.headless === false ? 'real Chrome (headed)' : 'headless';
+    const launchMode = wsEndpoint ? 'connect (CDP)' : (config.browser.headless === false ? 'real Chrome (headed)' : 'headless');
     this.sessions.set(analysisId, {
       browser,
       page,
@@ -109,7 +116,7 @@ export class BrowserManager {
       deviceScaleFactor,
       isMobile,
     });
-    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, ${headlessLabel}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, viewport: ${width}×${height}@${deviceScaleFactor}x, active: ${this.sessions.size})`);
+    console.log(`[browser] Session created for ${analysisId} (engine: ${engine}, ${launchMode}, proxy: ${proxy || 'none'}, UA: ${userAgent ? 'custom' : 'default'}, viewport: ${width}×${height}@${deviceScaleFactor}x, active: ${this.sessions.size})`);
     return page;
   }
 

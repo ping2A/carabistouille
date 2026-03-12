@@ -1,0 +1,14 @@
+# PulseAudio config for Baliverne (Neko-style virtual devices).
+# See: https://github.com/m1k1o/neko/blob/master/runtime/default.pa
+
+### Virtual output sink (browser audio out)
+load-module module-null-sink sink_name=audio_output sink_properties=device.description="Virtual_Audio_Output"
+
+### Virtual input sink
+load-module module-null-sink sink_name=audio_input sink_properties=device.description="Virtual_Audio_Input"
+
+### Virtual microphone (source) from the input sink monitor
+load-module module-virtual-source source_name=microphone master=audio_input.monitor source_properties=device.description="Virtual_Microphone"
+
+### Unix socket so other processes can use Pulse (e.g. capture)
+load-module module-native-protocol-unix socket=/tmp/pulseaudio.socket auth-anonymous=1

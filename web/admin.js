@@ -85,23 +85,65 @@ class AdminApp {
   /** Fetch analyses from API and re-render stats and table. */
   async refresh() {
     try {
-      const res = await fetch('/api/analyses');
-      this.analyses = await res.json();
+      const res = await fetch('/api/analyses', { cache: 'no-store', headers: { Accept: 'application/json' } });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        console.error('[admin] GET /api/analyses failed:', res.status, res.statusText, data);
+        this.analyses = [];
+        this.showRefreshError(res.status, res.statusText);
+      } else if (Array.isArray(data)) {
+        this.analyses = data;
+        this.clearRefreshError();
+      } else if (data && Array.isArray(data.analyses)) {
+        this.analyses = data.analyses;
+        this.clearRefreshError();
+      } else {
+        console.warn('[admin] GET /api/analyses returned non-array:', typeof data, data);
+        this.analyses = [];
+        this.clearRefreshError();
+      }
       this.renderStats();
       this.renderTable();
     } catch (err) {
       console.error('[admin] Refresh failed:', err);
+      this.analyses = [];
+      this.showRefreshError(0, err.message || 'Network error');
+      this.renderStats();
+      this.renderTable();
     }
+  }
+
+  /** Show error message when refresh fails (e.g. network or API error). */
+  showRefreshError(status, text) {
+    let el = document.getElementById('admin-refresh-error');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'admin-refresh-error';
+      el.className = 'admin-refresh-error';
+      const topbar = document.querySelector('.admin-topbar');
+      if (topbar && topbar.parentNode) topbar.parentNode.insertBefore(el, topbar.nextSibling);
+    }
+    el.textContent = status ? `Failed to load analyses (${status} ${text}). ` : `Failed to load analyses: ${text}. `;
+    el.innerHTML += '<button type="button" class="admin-retry-btn">Retry</button>';
+    el.style.display = 'block';
+    el.querySelector('.admin-retry-btn').onclick = () => this.refresh();
+  }
+
+  /** Hide refresh error banner. */
+  clearRefreshError() {
+    const el = document.getElementById('admin-refresh-error');
+    if (el) el.style.display = 'none';
   }
 
   /** Render stat cards: total, active, complete, errors, average risk. */
   renderStats() {
-    const total = this.analyses.length;
-    const running = this.analyses.filter(a => a.status === 'running' || a.status === 'pending').length;
-    const complete = this.analyses.filter(a => a.status === 'complete').length;
-    const errors = this.analyses.filter(a => a.status === 'error').length;
+    const list = Array.isArray(this.analyses) ? this.analyses : [];
+    const total = list.length;
+    const running = list.filter(a => a.status === 'running' || a.status === 'pending').length;
+    const complete = list.filter(a => a.status === 'complete').length;
+    const errors = list.filter(a => a.status === 'error').length;
     const avgRisk = complete > 0
-      ? Math.round(this.analyses.filter(a => a.report).reduce((s, a) => s + (a.report.risk_score || 0), 0) / complete)
+      ? Math.round(list.filter(a => a.risk_score != null).reduce((s, a) => s + (a.risk_score || 0), 0) / complete)
       : 0;
 
     this.statsEl.innerHTML = `
@@ -130,21 +172,23 @@ class AdminApp {
 
   /** Render analyses table rows; show empty state if no analyses. */
   renderTable() {
-    if (this.analyses.length === 0) {
+    const list = Array.isArray(this.analyses) ? this.analyses : [];
+    if (!this.tbody) return;
+    if (list.length === 0) {
       this.emptyEl.style.display = 'flex';
       this.tbody.innerHTML = '';
       return;
     }
 
     this.emptyEl.style.display = 'none';
-    this.tbody.innerHTML = this.analyses.map(a => {
+    this.tbody.innerHTML = list.map(a => {
       const created = new Date(a.created_at).toLocaleString();
       const completed = a.completed_at ? new Date(a.completed_at).toLocaleString() : '—';
-      const risk = a.report ? a.report.risk_score : '—';
-      const riskClass = a.report ? this.riskClass(a.report.risk_score) : '';
-      const requests = a.report ? a.report.network_requests.length : '—';
-      const scripts = a.report ? a.report.scripts.length : '—';
-      const redirects = a.report ? a.report.redirect_chain.length : '—';
+      const risk = a.risk_score != null ? a.risk_score : '—';
+      const riskClass = a.risk_score != null ? this.riskClass(a.risk_score) : '';
+      const requests = a.network_request_count != null ? a.network_request_count : '—';
+      const scripts = a.scripts_count != null ? a.scripts_count : '—';
+      const redirects = a.redirect_count != null ? a.redirect_count : '—';
       const verdictLabel = getVerdictLabel(a.tags || []);
       const verdictClass = verdictLabel === 'False positive' ? 'false-positive' : 'malicious';
       const otherTags = (a.tags || []).filter((t) => !['false positive', 'malicious', 'phishing', 'click fix'].includes(String(t).toLowerCase()));

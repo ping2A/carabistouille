@@ -1,13 +1,18 @@
 //! Docker agent manager: build image, start/stop container for the Puppeteer agent.
 //!
-//! Activated by passing `--docker-agent` to the server binary.
+//! Activated by passing `--agent docker` (or `docker:real`, `docker:lightpanda`) to the server binary.
 //! The container runs the agent which connects back to the host server via WebSocket.
+//! With `docker:lightpanda`, a Lightpanda browser container is started first and the agent connects to it via CDP.
 
 use std::process::Stdio;
 use tokio::process::Command;
 
 const IMAGE_NAME: &str = "carabistouille-agent";
 const CONTAINER_NAME: &str = "carabistouille-agent";
+const LIGHTPANDA_IMAGE: &str = "lightpanda/browser:nightly";
+const LIGHTPANDA_CONTAINER: &str = "carabistouille-lightpanda";
+const LIGHTPANDA_NETWORK: &str = "carabistouille-net";
+const LIGHTPANDA_CDP_PORT: u16 = 9222;
 
 /// Path to the docker binary. Tries PATH first, then common install locations (e.g. when run from IDE with minimal PATH).
 fn docker_binary() -> String {
@@ -80,21 +85,74 @@ pub async fn ensure_image(agent_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Start the Lightpanda browser container and create network. No-op if image pull/run fails (logs and returns Err).
+async fn start_lightpanda_container(docker: &str) -> Result<(), String> {
+    // Remove stale Lightpanda container if any
+    let _ = Command::new(docker)
+        .args(["rm", "-f", LIGHTPANDA_CONTAINER])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+
+    tracing::info!("Creating network '{}' (if not exists)", LIGHTPANDA_NETWORK);
+    let _ = Command::new(docker)
+        .args(["network", "create", LIGHTPANDA_NETWORK])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await;
+
+    tracing::info!("Starting Lightpanda browser container '{}' (image: {})", LIGHTPANDA_CONTAINER, LIGHTPANDA_IMAGE);
+    let out = Command::new(docker)
+        .args([
+            "run",
+            "-d",
+            "--platform",
+            "linux/amd64",
+            "--name",
+            LIGHTPANDA_CONTAINER,
+            "--network",
+            LIGHTPANDA_NETWORK,
+            "-p",
+            &format!("{}:{}", LIGHTPANDA_CDP_PORT, LIGHTPANDA_CDP_PORT),
+            LIGHTPANDA_IMAGE,
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run Lightpanda container: {e}"))?;
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("Lightpanda container start failed: {stderr}. Pull the image with: docker pull {LIGHTPANDA_IMAGE}"));
+    }
+    tracing::info!("Lightpanda container '{}' started (CDP on port {})", LIGHTPANDA_CONTAINER, LIGHTPANDA_CDP_PORT);
+    Ok(())
+}
+
 /// Start the agent container (removes any stale container first).
+/// When `lightpanda` is true, starts the Lightpanda browser container first and passes BROWSER_WS_ENDPOINT to the agent.
 /// `server_port` is the host port the server listens on.
 /// `use_tls`: if true, the main server uses HTTPS, so the agent must connect with wss://.
 /// `browser_engine` selects puppeteer or puppeteer-extra inside the container.
 /// `real_chrome`: if true, run Chrome in headed mode (HEADLESS=false) with Xvfb for a more realistic browser.
+/// `lightpanda`: if true, run Lightpanda browser in a separate container and connect the agent to it via CDP.
 /// `wireguard_config`: if Some(path), mount the WireGuard config and run with NET_ADMIN so all traffic goes through the VPN.
 pub async fn start_container(
     server_port: u16,
     use_tls: bool,
     browser_engine: &str,
     real_chrome: bool,
+    lightpanda: bool,
     wireguard_config: Option<&std::path::Path>,
 ) -> Result<String, String> {
-    // Remove stale container if any
     let docker = docker_binary();
+
+    if lightpanda {
+        start_lightpanda_container(&docker).await?;
+    }
+
+    // Remove stale agent container if any
     let _ = Command::new(&docker)
         .args(["rm", "-f", CONTAINER_NAME])
         .stdout(Stdio::null())
@@ -106,16 +164,20 @@ pub async fn start_container(
     let server_url = format!("{scheme}://host.docker.internal:{server_port}/ws/agent");
 
     tracing::info!(
-        "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={}, wireguard={})",
+        "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={}, lightpanda={}, wireguard={})",
         CONTAINER_NAME,
         browser_engine,
         server_url,
         real_chrome,
+        lightpanda,
         wireguard_config.is_some(),
     );
 
     let server_url_env = format!("SERVER_URL={server_url}");
     let browser_engine_env = format!("BROWSER_ENGINE={browser_engine}");
+    let lightpanda_env = lightpanda.then(|| {
+        format!("BROWSER_WS_ENDPOINT=ws://{}:{}", LIGHTPANDA_CONTAINER, LIGHTPANDA_CDP_PORT)
+    });
 
     let mut args = vec![
         "run",
@@ -131,6 +193,14 @@ pub async fn start_container(
         "-e",
         browser_engine_env.as_str(),
     ];
+    if lightpanda {
+        args.push("--network");
+        args.push(LIGHTPANDA_NETWORK);
+        if let Some(ref e) = lightpanda_env {
+            args.push("-e");
+            args.push(e.as_str());
+        }
+    }
     if real_chrome {
         args.push("-e");
         args.push("HEADLESS=false");
@@ -180,16 +250,39 @@ pub async fn start_container(
     Ok(container_id)
 }
 
-/// Stop and remove the agent container. Logs but does not fail.
+/// Stop and remove the agent container (and Lightpanda container if present). Uses `docker rm -f`.
+/// Logs but does not fail; idempotent (no-op if containers already gone).
 pub async fn stop_container() {
-    tracing::info!("Stopping Docker agent container '{}'", CONTAINER_NAME);
     let docker = docker_binary();
-    let _ = Command::new(&docker)
+    tracing::info!("Stopping and removing Docker agent container '{}'", CONTAINER_NAME);
+    match Command::new(&docker)
         .args(["rm", "-f", CONTAINER_NAME])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .await;
+        .await
+    {
+        Ok(s) if s.success() => tracing::info!("Docker agent container '{}' removed", CONTAINER_NAME),
+        Ok(s) => {
+            if s.code() != Some(1) {
+                tracing::warn!(code = ?s.code(), "docker rm -f {} failed", CONTAINER_NAME);
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to run docker rm -f {}", CONTAINER_NAME),
+    }
+    tracing::info!("Stopping and removing Lightpanda container '{}' (if present)", LIGHTPANDA_CONTAINER);
+    match Command::new(&docker)
+        .args(["rm", "-f", LIGHTPANDA_CONTAINER])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => tracing::info!("Lightpanda container '{}' removed", LIGHTPANDA_CONTAINER),
+        Ok(s) if s.code() == Some(1) => {}
+        Ok(s) => tracing::warn!(code = ?s.code(), "docker rm -f {} failed", LIGHTPANDA_CONTAINER),
+        Err(e) => tracing::warn!(error = %e, "failed to run docker rm -f {}", LIGHTPANDA_CONTAINER),
+    }
 }
 
 /// Stream container logs to the server's stdout (spawns a background task).

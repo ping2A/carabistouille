@@ -76,6 +76,30 @@
   color: var(--text-primary);
 }
 
+.admin-refresh-error {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 24px;
+  background: var(--danger);
+  color: #fff;
+  font-size: 14px;
+}
+
+.admin-refresh-error .admin-retry-btn {
+  padding: 6px 12px;
+  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.admin-refresh-error .admin-retry-btn:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 /* Table */
 .admin-table-wrapper {
   flex: 1;

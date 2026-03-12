@@ -78,6 +78,13 @@ class App {
     this.analysisStartTime = null;
     this._reportSearchQuery = '';
     this._scrubberIndex = 0;
+    this.webrtcPc = null;
+    this.iceServers = [];
+    this.wsBytesSent = 0;
+    this.wsBytesReceived = 0;
+    this.webrtcRttMs = null;
+    this.webrtcPacketsLost = null;
+    this._connectionStatsInterval = null;
 
     this.initElements();
     this.initEventListeners();
@@ -676,6 +683,11 @@ class App {
     this.viewportImg = document.getElementById('viewport-img');
     this.viewportPlaceholder = document.getElementById('viewport-placeholder');
     this.viewportWrapper = document.getElementById('viewport-wrapper');
+    this.viewportWebrtc = document.getElementById('viewport-webrtc');
+    this.viewportVideo = document.getElementById('viewport-video');
+    this.viewportWebrtcWaiting = document.getElementById('viewport-webrtc-waiting');
+    this.viewportWebrtcWaitingText = document.getElementById('viewport-webrtc-waiting-text');
+    this.viewportWebrtcPlaceholder = document.getElementById('viewport-webrtc-placeholder');
     this.inspectHighlight = document.getElementById('inspect-highlight');
     this.elementInspector = document.getElementById('element-inspector');
     this.inspectorContent = document.getElementById('inspector-content');
@@ -684,6 +696,13 @@ class App {
     this.riskScoreEl = document.getElementById('risk-score');
     this.agentModeEl = document.getElementById('agent-mode');
     this.agentEngineEl = document.getElementById('agent-engine');
+    this.streamVideoEl = document.getElementById('stream-video');
+    this.streamCodecEl = document.getElementById('stream-codec');
+    this.streamFpsEl = document.getElementById('stream-fps');
+    this.streamInputEl = document.getElementById('stream-input');
+    this.streamIceEl = document.getElementById('stream-ice');
+    this.networkLabelAgentEl = document.getElementById('network-label-agent');
+    this.networkEdgeServerAgentEl = document.getElementById('network-edge-server-agent');
     this.settingsBtn = document.getElementById('settings-btn');
     this.settingsModal = document.getElementById('settings-modal');
     this.settingsClose = document.getElementById('settings-close');
@@ -716,6 +735,10 @@ class App {
     this.verdictSubtypeRow = document.getElementById('verdict-subtype-row');
     this.reportRunOptions = document.getElementById('report-run-options');
     this.reportRunOptionsBody = document.getElementById('report-run-options-body');
+    this.connectionStatsEl = document.getElementById('connection-stats');
+    this.connectionStatsBytesEl = document.getElementById('connection-stats-bytes');
+    this.connectionStatsQualityEl = document.getElementById('connection-stats-quality');
+    this.sidebarConnectionStatsEl = document.getElementById('sidebar-connection-stats');
   }
 
   /** Form submit, tool buttons, stop, proxy toggle, tab clicks, search inputs, viewport click/scroll/mousemove, keyboard, resizer. */
@@ -789,7 +812,24 @@ class App {
 
     this.viewportImg.addEventListener('click', (e) => this.handleViewportClick(e));
     this.viewportImg.addEventListener('wheel', (e) => this.handleViewportScroll(e), { passive: false });
-    this.viewportImg.addEventListener('mousemove', (e) => this.handleViewportMouseMove(e));
+    if (this.viewportVideo) {
+      this.viewportVideo.addEventListener('click', (e) => this.handleViewportClick(e));
+      this.viewportVideo.addEventListener('wheel', (e) => this.handleViewportScroll(e), { passive: false });
+    }
+    // Document-level mousemove so we keep sending when pointer is over viewport even after clicking elsewhere (viewport loses focus)
+    document.addEventListener('mousemove', (e) => {
+      if (!this.ws || this.activeTool !== 'interact') return;
+      const el = this.streamVideoMode === 'webrtc' && this.viewportVideo?.offsetParent != null
+        ? this.viewportVideo
+        : this.viewportImg;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width && rect.height &&
+          e.clientX >= rect.left && e.clientX <= rect.right &&
+          e.clientY >= rect.top && e.clientY <= rect.bottom) {
+        this.handleViewportMouseMove(e);
+      }
+    });
 
     document.addEventListener('keydown', (e) => {
       if (!this.ws || !this.currentAnalysisId) return;
@@ -800,6 +840,9 @@ class App {
       } else {
         this.wsSend({ type: 'keypress', key: e.key });
       }
+      // Prevent Enter (and other keys) from triggering form submit or other page actions while controlling the remote view
+      e.preventDefault();
+      e.stopPropagation();
     });
 
     this._initReportResizer();
@@ -837,13 +880,36 @@ class App {
     });
   }
 
-  /** Map mouse event to viewport image coordinates (accounting for scale). */
   /**
-   * Get viewport-relative (x, y) from mouse/pointer event, accounting for image offset and scale.
+   * Get viewport-relative (x, y) from mouse/pointer event (screenshot image or WebRTC video).
+   * For WebRTC (Baliverne-style): use video element rect and stream aspect ratio (videoWidth/videoHeight or 1920×1080).
    * @param {MouseEvent|WheelEvent} e - Event.
    * @returns {{ x: number, y: number } | null}
    */
   getViewportCoords(e) {
+    if (this.streamVideoMode === 'webrtc' && this.viewportVideo) {
+      const rect = this.viewportVideo.getBoundingClientRect();
+      if (!rect.width || !rect.height) return null;
+      const streamW = this.viewportVideo.videoWidth > 0 ? this.viewportVideo.videoWidth : 1920;
+      const streamH = this.viewportVideo.videoHeight > 0 ? this.viewportVideo.videoHeight : 1080;
+      const contentAspect = streamW / streamH;
+      const rectAspect = rect.width / rect.height;
+      let contentLeft, contentTop, contentWidth, contentHeight;
+      if (rectAspect > contentAspect) {
+        contentHeight = rect.height;
+        contentWidth = rect.height * contentAspect;
+        contentLeft = rect.left + (rect.width - contentWidth) / 2;
+        contentTop = rect.top;
+      } else {
+        contentWidth = rect.width;
+        contentHeight = rect.width / contentAspect;
+        contentLeft = rect.left;
+        contentTop = rect.top + (rect.height - contentHeight) / 2;
+      }
+      const x = Math.max(0, Math.min(streamW, ((e.clientX - contentLeft) / contentWidth) * streamW));
+      const y = Math.max(0, Math.min(streamH, ((e.clientY - contentTop) / contentHeight) * streamH));
+      return { x: Math.round(x), y: Math.round(y) };
+    }
     const rect = this.viewportImg.getBoundingClientRect();
     const nw = this.viewportImg.naturalWidth;
     const nh = this.viewportImg.naturalHeight;
@@ -880,13 +946,12 @@ class App {
     this.wsSend({ type: 'scroll', delta_x: e.deltaX, delta_y: e.deltaY });
   }
 
-  /** Throttled mousemove: send coordinates to agent for hover effects. */
-  /** Throttled mousemove: send coordinates to agent for hover/cursor. */
+  /** Throttled mousemove: send coordinates to agent for hover/cursor. Use ~60 Hz so Baliverne runtime (which coalesces at 125 Hz) feels responsive; 100 ms was too laggy. */
   handleViewportMouseMove(e) {
     if (!this.ws || this.activeTool !== 'interact') return;
 
     const now = Date.now();
-    if (now - this.lastMouseMoveTime < 100) return;
+    if (now - this.lastMouseMoveTime < 16) return; // ~60 Hz for responsive remote cursor
     this.lastMouseMoveTime = now;
 
     const coords = this.getViewportCoords(e);
@@ -979,8 +1044,14 @@ class App {
         console.warn(`[ui] Stop failed: ${res.status} ${text}`);
         this._resetFinishButtonContent(defaultContent, loadingContent);
         this.stopBtn.disabled = false;
+      } else {
+        // Mark complete immediately so we stop sending input; server will also send analysis_complete.
+        this.updateStopButton('complete');
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.close();
+        }
+        this.loadAnalyses();
       }
-      // On success, keep spinner until we receive analysis_complete (handled in updateStopButton).
     } catch (err) {
       console.error('[ui] Stop error:', err);
       this._resetFinishButtonContent(defaultContent, loadingContent);
@@ -1023,15 +1094,15 @@ class App {
     if (dateTo) list = list.filter((a) => (a.created_at || '').slice(0, 10) <= dateTo);
     if (riskMin !== undefined && riskMin !== '') {
       const min = parseInt(riskMin, 10);
-      if (!isNaN(min)) list = list.filter((a) => (a.report?.risk_score ?? 0) >= min);
+      if (!isNaN(min)) list = list.filter((a) => (a.risk_score ?? 0) >= min);
     }
     if (riskMax !== undefined && riskMax !== '') {
       const max = parseInt(riskMax, 10);
-      if (!isNaN(max)) list = list.filter((a) => (a.report?.risk_score ?? 0) <= max);
+      if (!isNaN(max)) list = list.filter((a) => (a.risk_score ?? 0) <= max);
     }
-    if (hasRedirects) list = list.filter((a) => (a.report?.redirect_chain?.length || 0) > 0);
-    if (hasClipboard) list = list.filter((a) => (a.report?.clipboard_reads?.length || 0) > 0);
-    if (hasMixed) list = list.filter((a) => a.report?.security?.has_mixed_content === true);
+    if (hasRedirects) list = list.filter((a) => (a.redirect_count || 0) > 0);
+    if (hasClipboard) list = list.filter((a) => a.has_clipboard === true);
+    if (hasMixed) list = list.filter((a) => a.has_mixed_content === true);
 
     const allTags = [...new Set(list.flatMap((a) => (a.tags || []).filter((t) => VERDICT_TAG_LIST.includes(String(t).toLowerCase()))))].sort();
     if (this.tagFilter && this.tagFilterChips) {
@@ -1172,8 +1243,23 @@ class App {
     if (this.reportRunOptions) this.reportRunOptions.style.display = 'none';
     if (this.reportVerdictBadge) this.reportVerdictBadge.style.display = 'none';
     this.elementInspector.style.display = 'none';
+    this.streamVideoMode = null;
     this.viewportImg.style.display = 'none';
     this.viewportPlaceholder.style.display = 'flex';
+    if (this.viewportWebrtc) this.viewportWebrtc.style.display = 'none';
+    if (this.viewportWebrtcWaiting) this.viewportWebrtcWaiting.style.display = 'none';
+    if (this.viewportWebrtcPlaceholder) this.viewportWebrtcPlaceholder.style.display = 'none';
+    if (this.viewportVideo) this.viewportVideo.classList.remove('has-stream');
+    if (this.webrtcPc) {
+      this.webrtcPc.close();
+      this.webrtcPc = null;
+      this.webrtcRttMs = null;
+      this.webrtcPacketsLost = null;
+    }
+    if (this.viewportVideo) {
+      this.viewportVideo.srcObject = null;
+      this.viewportVideo.classList.remove('has-stream');
+    }
   }
 
   /** Render "Options used for this analysis" from run_options (proxy, viewport, network, geo, etc.). */
@@ -1308,40 +1394,156 @@ class App {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/viewer/${analysisId}`;
     console.log(`[ui] Connecting viewer WS: ${wsUrl}`);
+    this.wsBytesSent = 0;
+    this.wsBytesReceived = 0;
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
       console.log(`[ui] Viewer WS connected for ${analysisId}`);
+      if (this.connectionStatsEl) this.connectionStatsEl.style.display = 'flex';
+      this._startConnectionStatsInterval();
     };
 
     this.ws.onmessage = (e) => {
       try {
-        const event = JSON.parse(e.data);
+        let raw = e.data;
+        if (raw instanceof ArrayBuffer) {
+          this.wsBytesReceived += raw.byteLength;
+          raw = new TextDecoder().decode(raw);
+        } else if (raw instanceof Blob) {
+          this.wsBytesReceived += raw.size;
+          console.warn('[ui] Received Blob, cannot parse as JSON');
+          return;
+        } else {
+          this.wsBytesReceived += new TextEncoder().encode(raw).length;
+        }
+        const event = JSON.parse(raw);
         this.wsEventCount++;
         if (event.type !== 'screenshot') {
           console.log(`[ui] <- WS event: ${event.type} (total: ${this.wsEventCount})`);
         }
         this.handleViewerEvent(event);
       } catch (err) {
-        console.error('[ui] WS parse error:', err, 'data:', e.data?.substring?.(0, 200));
+        console.error('[ui] WS parse error:', err, 'data:', typeof e.data === 'string' ? e.data?.substring?.(0, 200) : '(binary)');
       }
     };
 
     this.ws.onclose = (e) => {
       console.log(`[ui] Viewer WS closed (code=${e.code}, reason=${e.reason})`);
-      if (this.currentAnalysisId === analysisId) {
-        console.log(`[ui] Will reconnect in 2s...`);
-        setTimeout(() => {
-          if (this.currentAnalysisId === analysisId && (!this.ws || this.ws.readyState === WebSocket.CLOSED)) {
-            this.connectViewer(analysisId);
-          }
-        }, 2000);
-      }
+      this._stopConnectionStatsInterval();
+      if (this.connectionStatsEl) this.connectionStatsEl.style.display = 'none';
+      this.updateConnectionStats(); // clear sidebar connection stats
+      // Do not reconnect if this analysis was finished (complete/error) or user switched away.
+      if (this.currentAnalysisId !== analysisId) return;
+      if (this.currentStatus === 'complete' || this.currentStatus === 'error') return;
+      console.log(`[ui] Will reconnect in 2s...`);
+      setTimeout(() => {
+        if (this.currentAnalysisId === analysisId && this.currentStatus !== 'complete' && this.currentStatus !== 'error' && (!this.ws || this.ws.readyState === WebSocket.CLOSED)) {
+          this.connectViewer(analysisId);
+        }
+      }, 2000);
     };
 
     this.ws.onerror = (e) => {
       console.error(`[ui] Viewer WS error:`, e);
     };
+  }
+
+  _startConnectionStatsInterval() {
+    this._stopConnectionStatsInterval();
+    this._connectionStatsInterval = setInterval(async () => {
+      if (this.webrtcPc) await this._pollWebRTCStats();
+      this.updateConnectionStats();
+    }, 1000);
+  }
+
+  _stopConnectionStatsInterval() {
+    if (this._connectionStatsInterval) {
+      clearInterval(this._connectionStatsInterval);
+      this._connectionStatsInterval = null;
+    }
+  }
+
+  /** Format bytes as KB or MB for display. */
+  _formatBytes(n) {
+    if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + ' MB';
+    if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+    return n + ' B';
+  }
+
+  /** Update connection stats UI: bytes ↓/↑ and quality (WebRTC RTT/loss or WebSocket). */
+  updateConnectionStats() {
+    const down = this._formatBytes(this.wsBytesReceived || 0);
+    const up = this._formatBytes(this.wsBytesSent || 0);
+    const bytesText = `↓ ${down}  ↑ ${up}`;
+    const isOpen = this.ws?.readyState === WebSocket.OPEN;
+
+    if (this.connectionStatsBytesEl) {
+      this.connectionStatsBytesEl.textContent = bytesText;
+      this.connectionStatsBytesEl.title = `Received: ${down}, Sent: ${up}`;
+    }
+    if (this.sidebarConnectionStatsEl) {
+      if (!isOpen) {
+        this.sidebarConnectionStatsEl.textContent = '—';
+        this.sidebarConnectionStatsEl.title = '';
+      } else {
+        let qualityPart = '';
+        if (this.webrtcPc && (this.webrtcRttMs != null || this.webrtcPacketsLost != null)) {
+          const parts = [];
+          if (this.webrtcRttMs != null) parts.push(`RTT ${Math.round(this.webrtcRttMs)} ms`);
+          if (this.webrtcPacketsLost != null) parts.push(`${this.webrtcPacketsLost}% loss`);
+          qualityPart = ' · ' + parts.join(' · ');
+        } else {
+          qualityPart = ' · WebSocket';
+        }
+        this.sidebarConnectionStatsEl.textContent = bytesText + qualityPart;
+        this.sidebarConnectionStatsEl.title = `Received: ${down}, Sent: ${up}${qualityPart}`;
+      }
+    }
+
+    const qualityEl = this.connectionStatsQualityEl;
+    if (!qualityEl) return;
+    if (this.webrtcPc && (this.webrtcRttMs != null || this.webrtcPacketsLost != null)) {
+      const parts = [];
+      if (this.webrtcRttMs != null) parts.push(`RTT ${Math.round(this.webrtcRttMs)} ms`);
+      if (this.webrtcPacketsLost != null) parts.push(`${this.webrtcPacketsLost}% loss`);
+      qualityEl.textContent = parts.join(' · ');
+      qualityEl.title = 'WebRTC video link quality';
+      qualityEl.classList.remove('quality-good', 'quality-fair', 'quality-poor');
+      if (this.webrtcRttMs != null) {
+        if (this.webrtcRttMs < 80) qualityEl.classList.add('quality-good');
+        else if (this.webrtcRttMs < 200) qualityEl.classList.add('quality-fair');
+        else qualityEl.classList.add('quality-poor');
+      }
+    } else {
+      qualityEl.textContent = isOpen ? 'WebSocket' : '';
+      qualityEl.title = isOpen ? 'Viewer connection (WebSocket)' : '';
+      qualityEl.classList.remove('quality-good', 'quality-fair', 'quality-poor');
+    }
+  }
+
+  /** Poll WebRTC stats for RTT and packet loss (when Baliverne video is active). */
+  async _pollWebRTCStats() {
+    if (!this.webrtcPc || this.webrtcPc.connectionState === 'closed') return;
+    try {
+      const stats = await this.webrtcPc.getStats();
+      let rttMs = null;
+      let packetsLost = null;
+      stats.forEach((report) => {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.roundTripTime != null) {
+          rttMs = report.roundTripTime * 1000;
+        }
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          const lost = report.packetsLost;
+          const total = (report.packetsReceived || 0) + (lost || 0);
+          if (total > 0 && lost != null) {
+            packetsLost = Math.round((lost / total) * 100);
+          }
+        }
+      });
+      this.webrtcRttMs = rttMs;
+      this.webrtcPacketsLost = packetsLost;
+    } catch (_) {}
   }
 
   /**
@@ -1351,6 +1553,7 @@ class App {
   handleViewerEvent(event) {
     switch (event.type) {
       case 'screenshot':
+        if (this.streamVideoMode === 'webrtc') break; // Baliverne: video via WebRTC only, ignore screenshot
         this.screenshotCount++;
         if (!event.data || typeof event.data !== 'string') break;
         if (this.screenshotCount <= 3 || this.screenshotCount % 20 === 0) {
@@ -1374,13 +1577,23 @@ class App {
         }
         break;
 
-      case 'network_request_captured':
-        if (!this.analysisStartTime && event.request.timestamp) {
-          this.analysisStartTime = event.request.timestamp;
+      case 'network_request_captured': {
+        // Agent sends event.request; Baliverne runtime sends flat url/method/status/status_text
+        const request = event.request || {
+          url: event.url || '',
+          method: event.method || 'GET',
+          resource_type: event.resource_type || 'other',
+          status: event.status ?? null,
+          status_text: event.status_text ?? null,
+          timestamp: event.timestamp ?? Date.now(),
+        };
+        if (!this.analysisStartTime && request.timestamp) {
+          this.analysisStartTime = request.timestamp;
         }
-        this.networkRequests.push(event.request);
+        this.networkRequests.push(request);
         this.renderNetworkPanel();
         break;
+      }
 
       case 'script_loaded':
         this.scripts.push(event.script);
@@ -1549,28 +1762,156 @@ class App {
         this.loadAnalyses();
         break;
 
+      case 'browser_starting':
+        // Baliverne: container is up, browser/display not ready yet — ignore or show transient state
+        break;
+
+      case 'stream_mode':
+        // Baliverne: video is via WebRTC; show video viewport (Baliverne-style), waiting message, request SDP offer
+        if (event.video === 'webrtc') {
+          this.streamVideoMode = 'webrtc';
+          this.viewportPlaceholder.style.display = 'none';
+          this.viewportImg.style.display = 'none';
+          if (this.viewportWebrtc) this.viewportWebrtc.style.display = 'flex';
+          if (this.viewportWebrtcWaiting) this.viewportWebrtcWaiting.style.display = 'block';
+          if (this.viewportWebrtcPlaceholder) this.viewportWebrtcPlaceholder.style.display = 'none';
+          this.wsSend({ type: 'webrtc_request_offer' });
+        }
+        break;
+
+      case 'webrtc_offer':
+        if (!event.sdp) break;
+        this.setupWebRTCViewer(event.sdp);
+        break;
+
+      case 'webrtc_ice_candidate':
+        if (this.webrtcPc && event.candidate) {
+          this.webrtcPc.addIceCandidate(new RTCIceCandidate(event.candidate)).catch((err) => {
+            console.warn('[ui] addIceCandidate failed:', err);
+          });
+        }
+        break;
+
       default:
         console.warn(`[ui] Unknown event type: ${event.type}`);
     }
   }
 
   /**
+   * Set up WebRTC viewer from server SDP offer (Baliverne): create PeerConnection, set remote description,
+   * create answer, send answer and ICE candidates; attach received track to viewport video.
+   * @param {object} sdp - { type: 'offer', sdp: string }
+   */
+  async setupWebRTCViewer(sdp) {
+    if (this.webrtcPc) {
+      this.webrtcPc.close();
+      this.webrtcPc = null;
+      this.webrtcRttMs = null;
+      this.webrtcPacketsLost = null;
+    }
+    const config = { iceServers: [] };
+    if (Array.isArray(this.iceServers) && this.iceServers.length > 0) {
+      config.iceServers = this.iceServers.map((s) => ({
+        urls: typeof s.urls === 'string' ? s.urls.split(/\s+/) : [].concat(s.urls || []),
+        username: s.username || undefined,
+        credential: s.credential || undefined,
+      }));
+    }
+    const pc = new RTCPeerConnection(config);
+    this.webrtcPc = pc;
+
+    const video = this.viewportVideo;
+    pc.ontrack = (e) => {
+      console.log('[ui] WebRTC track received', e.track?.kind, e.streams?.length);
+      if (video) {
+        video.muted = true;
+        video.playsInline = true;
+        if (e.streams && e.streams[0]) {
+          video.srcObject = e.streams[0];
+        } else if (e.track) {
+          const stream = new MediaStream();
+          stream.addTrack(e.track);
+          video.srcObject = stream;
+        }
+        video.classList.add('has-stream');
+        video.play().catch((err) => console.warn('[ui] video.play failed', err));
+        if (this.viewportWebrtcWaiting) this.viewportWebrtcWaiting.style.display = 'none';
+        if (this.viewportWebrtcPlaceholder) this.viewportWebrtcPlaceholder.style.display = 'none';
+      }
+    };
+
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        this.wsSend({
+          type: 'webrtc_ice_candidate',
+          candidate: {
+            candidate: e.candidate.candidate,
+            sdpMid: e.candidate.sdpMid,
+            sdpMLineIndex: e.candidate.sdpMLineIndex,
+          },
+        });
+      }
+    };
+
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      this.wsSend({
+        type: 'webrtc_answer',
+        sdp: { type: answer.type, sdp: answer.sdp },
+      });
+      console.log('[ui] WebRTC answer sent');
+    } catch (err) {
+      console.warn('[ui] WebRTC setup failed', err);
+      pc.close();
+      this.webrtcPc = null;
+      this.webrtcRttMs = null;
+      this.webrtcPacketsLost = null;
+    }
+  }
+
+  /**
    * Display inspected element: highlight rect on viewport and show tag/attributes in inspector panel.
+   * Supports both screenshot viewport and WebRTC video (Baliverne).
    * @param {object} info - Element info from agent (tag, rect, attributes, text).
    */
   showElementInfo(info) {
-    const imgRect = this.viewportImg.getBoundingClientRect();
-    const scaleX = imgRect.width / this.viewportImg.naturalWidth;
-    const scaleY = imgRect.height / this.viewportImg.naturalHeight;
-
-    const imgOffset = {
-      x: this.viewportImg.offsetLeft,
-      y: this.viewportImg.offsetTop,
-    };
+    let scaleX, scaleY, left, top;
+    if (this.streamVideoMode === 'webrtc' && this.viewportVideo && this.viewportVideo.videoWidth > 0) {
+      const rect = this.viewportVideo.getBoundingClientRect();
+      const streamW = this.viewportVideo.videoWidth;
+      const streamH = this.viewportVideo.videoHeight;
+      const contentAspect = streamW / streamH;
+      const rectAspect = rect.width / rect.height;
+      let contentWidth, contentHeight, contentLeft, contentTop;
+      if (rectAspect > contentAspect) {
+        contentHeight = rect.height;
+        contentWidth = rect.height * contentAspect;
+        contentLeft = rect.left + (rect.width - contentWidth) / 2;
+        contentTop = rect.top;
+      } else {
+        contentWidth = rect.width;
+        contentHeight = rect.width / contentAspect;
+        contentLeft = rect.left;
+        contentTop = rect.top + (rect.height - contentHeight) / 2;
+      }
+      scaleX = contentWidth / streamW;
+      scaleY = contentHeight / streamH;
+      const wrapperRect = this.viewportWrapper.getBoundingClientRect();
+      left = contentLeft - wrapperRect.left + info.rect.x * scaleX;
+      top = contentTop - wrapperRect.top + info.rect.y * scaleY;
+    } else {
+      const imgRect = this.viewportImg.getBoundingClientRect();
+      scaleX = imgRect.width / (this.viewportImg.naturalWidth || 1);
+      scaleY = imgRect.height / (this.viewportImg.naturalHeight || 1);
+      left = this.viewportImg.offsetLeft + info.rect.x * scaleX;
+      top = this.viewportImg.offsetTop + info.rect.y * scaleY;
+    }
 
     this.inspectHighlight.style.display = 'block';
-    this.inspectHighlight.style.left = `${imgOffset.x + info.rect.x * scaleX}px`;
-    this.inspectHighlight.style.top = `${imgOffset.y + info.rect.y * scaleY}px`;
+    this.inspectHighlight.style.left = `${left}px`;
+    this.inspectHighlight.style.top = `${top}px`;
     this.inspectHighlight.style.width = `${info.rect.width * scaleX}px`;
     this.inspectHighlight.style.height = `${info.rect.height * scaleY}px`;
 
@@ -1623,7 +1964,10 @@ class App {
       return;
     }
     let modeText = '';
-    if (this.runMode === 'docker') {
+    if (this.agentBackend === 'baliverne') {
+      const browser = this.baliverneBrowser === 'firefox' ? 'Firefox' : 'Chrome';
+      modeText = `Baliverne + ${browser}`;
+    } else if (this.runMode === 'docker') {
       modeText = this.chromeMode === 'real' ? 'Docker + real Chrome' : 'Docker + headless';
     } else {
       if (this.headless === false) modeText = 'Local + real Chrome';
@@ -3068,8 +3412,11 @@ class App {
    * @param {object} data - Object to JSON.stringify and send.
    */
   wsSend(data) {
+    if (this.currentStatus === 'complete' || this.currentStatus === 'error') return;
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(data));
+      const str = JSON.stringify(data);
+      this.wsBytesSent += new TextEncoder().encode(str).length;
+      this.ws.send(str);
     }
   }
 
@@ -3082,6 +3429,8 @@ class App {
 
         this.runMode = data.run_mode || 'local';
         this.chromeMode = data.chrome_mode ?? null;
+        this.agentBackend = data.agent_backend || 'builtin';
+        this.baliverneBrowser = data.baliverne_browser ?? null;
         if (data.agent_connected) {
           this.agentStatus.classList.remove('disconnected');
           this.agentStatus.classList.add('connected');
@@ -3094,17 +3443,59 @@ class App {
           this.submitBtn.disabled = true;
         }
         this.updateAgentHeaderInfo();
+        this.updateNetworkAndStreamInfo(data);
       } catch {
         this.agentStatus.classList.remove('connected');
         this.agentStatus.classList.add('disconnected');
         this.statusText.textContent = this.t('app.serverUnreachable');
         this.submitBtn.disabled = true;
         this.updateAgentHeaderInfo();
+        this.updateNetworkAndStreamInfo(null);
       }
     };
 
     await check();
     setInterval(check, 3000);
+  }
+
+  /** Update network graph labels and stream info (video, codec, fps, input, ICE servers) from /api/status. */
+  updateNetworkAndStreamInfo(data) {
+    this.iceServers = Array.isArray(data?.ice_servers) ? data.ice_servers : [];
+    const stream = data?.stream;
+    if (this.streamVideoEl) this.streamVideoEl.textContent = stream?.video ?? '—';
+    if (this.streamCodecEl) this.streamCodecEl.textContent = stream?.codec ?? '—';
+    if (this.streamFpsEl) this.streamFpsEl.textContent = stream?.fps != null ? String(stream.fps) : '—';
+    const inputLabels = { puppeteer: 'Puppeteer', xtest: 'xtest-injector', neko: 'Neko (xf86-input)' };
+    if (this.streamInputEl) this.streamInputEl.textContent = stream?.input ? (inputLabels[stream.input] || stream.input) : '—';
+    const iceServers = data?.ice_servers;
+    if (this.streamIceEl) {
+      if (Array.isArray(iceServers) && iceServers.length > 0) {
+        this.streamIceEl.textContent = iceServers.map((s) => s.urls || s).join(', ');
+        this.streamIceEl.title = iceServers.map((s) => s.urls || s).join('\n');
+      } else {
+        this.streamIceEl.textContent = '—';
+        this.streamIceEl.title = '';
+      }
+    }
+    if (!this.networkLabelAgentEl || !this.networkEdgeServerAgentEl) return;
+    if (!data) {
+      this.networkLabelAgentEl.textContent = 'Agent';
+      this.networkEdgeServerAgentEl.textContent = 'WS';
+      return;
+    }
+    const backend = data.agent_backend || 'builtin';
+    const runMode = data.run_mode || 'local';
+    if (backend === 'baliverne') {
+      const browser = (data.baliverne_browser === 'firefox' ? 'Firefox' : 'Chrome');
+      this.networkLabelAgentEl.textContent = `Baliverne (${browser})`;
+      this.networkEdgeServerAgentEl.textContent = 'WebRTC / Docker';
+    } else if (runMode === 'docker') {
+      this.networkLabelAgentEl.textContent = 'Agent (Docker)';
+      this.networkEdgeServerAgentEl.textContent = 'WS / Docker';
+    } else {
+      this.networkLabelAgentEl.textContent = 'Agent (local)';
+      this.networkEdgeServerAgentEl.textContent = 'WebSocket';
+    }
   }
 
   /**

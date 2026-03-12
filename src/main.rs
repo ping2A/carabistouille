@@ -6,28 +6,158 @@ use std::path::PathBuf;
 use carabistouille::{build_mcp_router, build_router, AppState};
 use tracing_subscriber::EnvFilter;
 
-/// Simple CLI flag parser (avoids adding clap for a handful of flags).
+/// Agent mode: how the server gets browser automation (local process, Docker container, or Baliverne).
+#[derive(Clone, Debug)]
+pub enum AgentMode {
+    /// Expect a local agent to connect to /ws/agent (run `cd agent && npm start` manually).
+    Local,
+    /// Run the Puppeteer agent in a Docker container (engine, real Chrome, or Lightpanda browser).
+    Docker {
+        engine: String,
+        real_chrome: bool,
+        /// Use Lightpanda browser (lightpanda/browser) via CDP instead of Chromium/Chrome.
+        lightpanda: bool,
+    },
+    /// Use Baliverne: one Docker Chrome/Firefox per analysis, X11 dummy driver, WebRTC, STUN/TURN.
+    /// Codec and browser can be set via agent string (e.g. baliverne:vp9, baliverne:chrome, baliverne:firefox:h264) or CLI/env.
+    Baliverne {
+        /// Override video codec (vp8, vp9, h264, av1). None = use env/config default.
+        codec: Option<String>,
+        /// Override browser (chrome, firefox). None = use env/config default (chrome).
+        browser: Option<String>,
+    },
+}
+
+impl AgentMode {
+    /// Parse from string (e.g. from --agent or AGENT env).
+    /// Values: "local"|"builtin", "docker", "docker:real", "docker:lightpanda", "baliverne", ...
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim().to_lowercase();
+        if s.is_empty() || s == "local" || s == "builtin" {
+            return Ok(AgentMode::Local);
+        }
+        if s == "baliverne" {
+            return Ok(AgentMode::Baliverne {
+                codec: None,
+                browser: None,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("baliverne:") {
+            let parts: Vec<&str> = rest.split(':').map(str::trim).filter(|p| !p.is_empty()).collect();
+            let mut codec = None;
+            let mut browser = None;
+            for p in &parts {
+                let lower = (*p).to_lowercase();
+                if ["vp8", "vp9", "av1", "h264"].contains(&lower.as_str()) {
+                    if codec.replace(lower).is_some() {
+                        return Err(format!("Duplicate Baliverne codec in '{}'", rest));
+                    }
+                } else if ["chrome", "firefox"].contains(&lower.as_str()) {
+                    if browser.replace(lower).is_some() {
+                        return Err(format!("Duplicate Baliverne browser in '{}'", rest));
+                    }
+                } else {
+                    return Err(format!(
+                        "Invalid Baliverne token '{}'. Use: baliverne, baliverne:chrome, baliverne:firefox, baliverne:vp8, baliverne:h264, baliverne:chrome:h264, ...",
+                        p
+                    ));
+                }
+            }
+            return Ok(AgentMode::Baliverne { codec, browser });
+        }
+        if s == "docker" {
+            return Ok(AgentMode::Docker {
+                engine: "puppeteer-extra".to_string(),
+                real_chrome: false,
+                lightpanda: false,
+            });
+        }
+        if let Some(rest) = s.strip_prefix("docker:") {
+            let parts: Vec<&str> = rest.split(':').collect();
+            let engine = match parts.get(0).copied() {
+                Some("puppeteer") => "puppeteer".to_string(),
+                Some("puppeteer-extra") | None => "puppeteer-extra".to_string(),
+                Some("lightpanda") => "puppeteer-extra".to_string(), // use puppeteer-extra for Lightpanda CDP
+                Some(other) if !other.is_empty() => other.to_string(),
+                _ => "puppeteer-extra".to_string(),
+            };
+            let real_chrome = parts.iter().any(|&p| p == "real");
+            let lightpanda = parts.iter().any(|&p| p == "lightpanda");
+            return Ok(AgentMode::Docker {
+                engine,
+                real_chrome,
+                lightpanda,
+            });
+        }
+        Err(format!(
+            "Unknown agent '{}'. Use: local, docker, docker:real, docker:lightpanda, baliverne, baliverne:chrome, baliverne:firefox, baliverne:vp8, baliverne:chrome:h264, ...",
+            s
+        ))
+    }
+
+    pub fn is_docker(&self) -> bool {
+        matches!(self, AgentMode::Docker { .. })
+    }
+
+    pub fn is_baliverne(&self) -> bool {
+        matches!(self, AgentMode::Baliverne { .. })
+    }
+
+    /// Baliverne video codec override from agent string (vp8, vp9, h264, av1). None = use config/env.
+    pub fn baliverne_codec(&self) -> Option<&str> {
+        match self {
+            AgentMode::Baliverne { codec: Some(c), .. } => Some(c.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Baliverne browser override from agent string (chrome, firefox). None = use config/env.
+    pub fn baliverne_browser(&self) -> Option<&str> {
+        match self {
+            AgentMode::Baliverne { browser: Some(b), .. } => Some(b.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn docker_engine(&self) -> &str {
+        match self {
+            AgentMode::Docker { engine, .. } => engine.as_str(),
+            _ => "puppeteer-extra",
+        }
+    }
+
+    pub fn docker_real_chrome(&self) -> bool {
+        match self {
+            AgentMode::Docker { real_chrome, .. } => *real_chrome,
+            _ => false,
+        }
+    }
+
+    pub fn docker_lightpanda(&self) -> bool {
+        match self {
+            AgentMode::Docker { lightpanda, .. } => *lightpanda,
+            _ => false,
+        }
+    }
+}
+
+/// Simple CLI flag parser.
 struct CliArgs {
     clean_db: bool,
-    /// Path to the SQLite database file (overrides DATABASE_PATH env).
     database: Option<PathBuf>,
-    /// Enable MCP server on a separate port for LLM tools (submit URL, list/get analyses, database summary).
     mcp: bool,
-    /// Port for the MCP server when --mcp is set (default 3001). Main app stays on PORT (default 3000).
     mcp_port: u16,
-    /// Start the agent inside a Docker container instead of expecting a local agent.
-    docker_agent: bool,
-    /// Browser engine passed into the Docker container (puppeteer | puppeteer-extra).
-    browser_engine: String,
-    /// When using --docker-agent: run Chrome in headed mode (real Chrome) with Xvfb for better anti-detection.
-    real_chrome: bool,
-    /// When using --docker-agent: path to WireGuard config so all agent traffic goes through the VPN.
+    /// Unified agent: local, docker, docker:real, baliverne, baliverne:vp9, baliverne:chrome, etc.
+    agent: AgentMode,
+    /// Override Baliverne video codec (vp8, vp9, h264, av1). Overridden by codec in --agent baliverne:CODEC.
+    baliverne_codec: Option<String>,
+    /// Override Baliverne browser (chrome, firefox). Overridden by browser in --agent baliverne:BROWSER.
+    baliverne_browser: Option<String>,
     wireguard_config: Option<std::path::PathBuf>,
-    /// Override listen address (host:port). Takes precedence over HOST and PORT.
     listen: Option<String>,
 }
 
-/// Parse command-line arguments: --clean-db, --database, --docker-agent, --real-chrome, --browser-engine, --wireguard-config.
+/// Parse command-line arguments: --clean-db, --database, --agent, --listen, etc.
 fn parse_args() -> CliArgs {
     let args: Vec<String> = std::env::args().collect();
     let clean_db = args.iter().any(|a| a == "--clean-db");
@@ -38,17 +168,6 @@ fn parse_args() -> CliArgs {
         .position(|a| a == "--database" || a == "--db")
         .and_then(|i| args.get(i + 1).cloned())
         .map(PathBuf::from);
-    let docker_agent = args.iter().any(|a| a == "--docker-agent");
-    let real_chrome = args.iter().any(|a| a == "--real-chrome");
-
-    let browser_engine = args
-        .iter()
-        .position(|a| a == "--browser-engine")
-        .and_then(|i| args.get(i + 1))
-        .cloned()
-        .or_else(|| std::env::var("BROWSER_ENGINE").ok())
-        .unwrap_or_else(|| "puppeteer-extra".to_string());
-
     let wireguard_config = args
         .iter()
         .position(|a| a == "--wireguard-config")
@@ -56,13 +175,80 @@ fn parse_args() -> CliArgs {
         .cloned()
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var("WIREGUARD_CONFIG_PATH").ok().map(std::path::PathBuf::from));
-
     let listen = args
         .iter()
         .position(|a| a == "--listen")
         .and_then(|i| args.get(i + 1))
         .cloned()
         .or_else(|| std::env::var("LISTEN").ok());
+
+    // Unified --agent; fallback: legacy --docker-agent / --use-baliverne-agent, then AGENT env, then "local"
+    let agent_str = args
+        .iter()
+        .position(|a| a == "--agent")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| {
+            if args.iter().any(|a| a == "--use-baliverne-agent")
+                || std::env::var("USE_BALIVERNE_AGENT").ok().as_deref() == Some("1")
+                || std::env::var("USE_BALIVERNE_AGENT").ok().as_deref() == Some("true")
+            {
+                Some("baliverne".to_string())
+            } else if args.iter().any(|a| a == "--docker-agent") {
+                let real = args.iter().any(|a| a == "--real-chrome");
+                let engine = args
+                    .iter()
+                    .position(|a| a == "--browser-engine")
+                    .and_then(|i| args.get(i + 1))
+                    .cloned()
+                    .or_else(|| std::env::var("BROWSER_ENGINE").ok())
+                    .unwrap_or_else(|| "puppeteer-extra".to_string());
+                Some(if real {
+                    format!("docker:{}:real", engine)
+                } else {
+                    format!("docker:{}", engine)
+                })
+            } else {
+                std::env::var("AGENT").ok()
+            }
+        })
+        .unwrap_or_else(|| "local".to_string());
+
+    let agent = AgentMode::parse(&agent_str).unwrap_or_else(|e| {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    });
+
+    let baliverne_codec = args
+        .iter()
+        .position(|a| a == "--baliverne-codec")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| std::env::var("BALIVERNE_VIDEO_CODEC").ok())
+        .map(|s| {
+            let c = s.trim().to_lowercase();
+            if ["vp8", "vp9", "av1", "h264"].contains(&c.as_str()) {
+                Some(c)
+            } else {
+                eprintln!("Invalid --baliverne-codec '{}'. Use: vp8, vp9, h264, av1", s);
+                std::process::exit(1);
+            }
+        })
+        .flatten();
+
+    let baliverne_browser = args
+        .iter()
+        .position(|a| a == "--baliverne-browser")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| std::env::var("BALIVERNE_BROWSER").ok())
+        .map(|s| {
+            let b = s.trim().to_lowercase();
+            if b == "chrome" || b == "firefox" {
+                Some(b)
+            } else {
+                eprintln!("Invalid --baliverne-browser '{}'. Use: chrome, firefox", s);
+                std::process::exit(1);
+            }
+        })
+        .flatten();
 
     let mcp_port = args
         .iter()
@@ -77,9 +263,9 @@ fn parse_args() -> CliArgs {
         database,
         mcp,
         mcp_port,
-        docker_agent,
-        browser_engine,
-        real_chrome,
+        agent,
+        baliverne_codec,
+        baliverne_browser,
         wireguard_config,
         listen,
     }
@@ -130,6 +316,75 @@ async fn resolve_tls_config() -> Option<axum_server::tls_rustls::RustlsConfig> {
     None
 }
 
+/// Per-container timeout so one stuck container doesn't block the rest.
+const CONTAINER_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Overall cleanup timeout (Docker agent + all Baliverne containers).
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// On shutdown: stop and remove Docker agent container (if any), then stop and remove all Baliverne containers.
+/// Each step is time-bounded so we don't hang if Docker or a container is unresponsive.
+async fn run_cleanup(
+    docker_agent_enabled: bool,
+    baliverne_state: Option<&std::sync::Arc<carabistouille::baliverne::state::AppState>>,
+) {
+    let cleanup = async {
+        if docker_agent_enabled {
+            tracing::info!("Stopping and removing Docker agent container...");
+            if let Err(_) =
+                tokio::time::timeout(CONTAINER_STOP_TIMEOUT, carabistouille::docker::stop_container()).await
+            {
+                tracing::warn!(
+                    "Docker agent stop timed out after {:?} — container may still be running",
+                    CONTAINER_STOP_TIMEOUT
+                );
+            } else {
+                tracing::info!("Docker agent container stopped");
+            }
+        }
+
+        if let Some(b) = baliverne_state {
+            let rooms = b.list_rooms().await;
+            if !rooms.is_empty() {
+                tracing::info!(count = rooms.len(), "Stopping and removing Baliverne container(s) from room list...");
+                for room in &rooms {
+                    let Some(ref cid) = room.container_id else { continue };
+                    match tokio::time::timeout(
+                        CONTAINER_STOP_TIMEOUT,
+                        b.docker.stop_container(cid),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            tracing::debug!(container_id = %cid, "Baliverne container stopped");
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(container_id = %cid, error = %e, "failed to stop Baliverne container");
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                container_id = %cid,
+                                "Baliverne container stop timed out after {:?}",
+                                CONTAINER_STOP_TIMEOUT
+                            );
+                        }
+                    }
+                }
+            }
+            // Safety net: list all Docker containers named baliverne-* and stop any remaining (e.g. rooms already removed or missed).
+            tracing::info!("Stopping any remaining Baliverne containers (Docker name prefix baliverne-)...");
+            b.docker.stop_all_baliverne_containers().await;
+            tracing::info!("Baliverne cleanup finished");
+        }
+    };
+
+    if let Err(_) = tokio::time::timeout(CLEANUP_TIMEOUT, cleanup).await {
+        tracing::warn!(
+            "Cleanup timed out after {:?} — stop the server and run: docker ps -a && docker rm -f <ids> if needed",
+            CLEANUP_TIMEOUT
+        );
+    }
+}
+
 /// Initialize logging, build router, optionally start Docker agent, bind with or without TLS, and run the server.
 #[tokio::main]
 async fn main() {
@@ -174,10 +429,6 @@ async fn main() {
     let (db_tx, _db_handle) = carabistouille::db::run_db_thread(&db_path)
         .expect("Failed to start SQLite DB thread");
 
-    let state = AppState::new(analyses, db_tx, cli.docker_agent, cli.real_chrome, cli.mcp);
-    // When MCP is enabled, serve it on a separate port; main app omits /mcp. When MCP disabled, /mcp returns 404 on main port.
-    let app = build_router(state.clone(), !cli.mcp);
-
     let addr: SocketAddr = if let Some(ref listen_str) = cli.listen {
         listen_str
             .parse()
@@ -194,15 +445,95 @@ async fn main() {
         SocketAddr::new(host, port)
     };
 
+    let (baliverne, analysis_to_baliverne, baliverne_room_to_analysis) =
+        if cli.agent.is_baliverne() {
+            tracing::info!("Baliverne agent enabled (Docker sessions, X11, WebRTC)");
+            let mut config = carabistouille::baliverne::config::Config::from_env(addr);
+            if let Some(c) = cli.agent.baliverne_codec() {
+                config.video_codec = c.to_string();
+                tracing::info!(codec = %c, "Baliverne video codec from --agent");
+            } else if let Some(ref c) = cli.baliverne_codec {
+                config.video_codec = c.clone();
+                tracing::info!(codec = %c, "Baliverne video codec from --baliverne-codec / BALIVERNE_VIDEO_CODEC");
+            }
+            if let Some(b) = cli.agent.baliverne_browser() {
+                if let Ok(kind) = b.parse::<carabistouille::baliverne::state::BrowserKind>() {
+                    config.browser = kind;
+                    tracing::info!(browser = %b, "Baliverne browser from --agent");
+                }
+            } else if let Some(ref b) = cli.baliverne_browser {
+                if let Ok(kind) = b.parse::<carabistouille::baliverne::state::BrowserKind>() {
+                    config.browser = kind;
+                    tracing::info!(browser = %b, "Baliverne browser from --baliverne-browser / BALIVERNE_BROWSER");
+                }
+            }
+            if let Some(bind) = config.stun_bind {
+                tracing::info!(%bind, "STUN server listening (ICE)");
+                let bind = bind;
+                tokio::spawn(async move {
+                    if let Err(e) = carabistouille::baliverne::stun::run(bind).await {
+                        tracing::error!(error = %e, "STUN failed");
+                    }
+                });
+            }
+            if let (Some(bind_addr), Some(public_ip_str)) = (config.turn_bind, config.turn_public_ip.as_ref()) {
+                if let Ok(public_ip) = public_ip_str.parse::<std::net::IpAddr>() {
+                    tracing::info!(%bind_addr, "TURN server listening");
+                    let cfg = carabistouille::baliverne::turn_relay::TurnRelayConfig {
+                        bind_addr,
+                        relay_public_ip: public_ip,
+                        realm: config.turn_realm.clone(),
+                        auth_static: config
+                            .turn_username
+                            .clone()
+                            .zip(config.turn_password.clone()),
+                        auth_dynamic_registry: None,
+                    };
+                    tokio::spawn(async move {
+                        if let Err(e) = carabistouille::baliverne::turn_relay::run_turn_relay(cfg).await {
+                            tracing::error!(error = ?e, "TURN failed");
+                        }
+                    });
+                }
+            }
+            let baliverne_state = std::sync::Arc::new(
+                carabistouille::baliverne::state::AppState::new(config),
+            );
+            let analysis_to_baliverne = std::sync::Arc::new(dashmap::DashMap::new());
+            let baliverne_room_to_analysis = std::sync::Arc::new(dashmap::DashMap::new());
+            (
+                Some(baliverne_state),
+                Some(analysis_to_baliverne),
+                Some(baliverne_room_to_analysis),
+            )
+        } else {
+            (None, None, None)
+        };
+
+    let baliverne_for_cleanup = baliverne.clone();
+    let state = AppState::new(
+        analyses,
+        db_tx,
+        cli.agent.is_docker(),
+        cli.agent.docker_real_chrome(),
+        cli.agent.docker_lightpanda(),
+        cli.mcp,
+        baliverne,
+        analysis_to_baliverne,
+        baliverne_room_to_analysis,
+    );
+    // When MCP is enabled, serve it on a separate port; main app omits /mcp. When MCP disabled, /mcp returns 404 on main port.
+    let app = build_router(state.clone(), !cli.mcp);
+
     // Resolve TLS early so the Docker agent can use wss:// when the main server uses HTTPS.
     let tls_config = resolve_tls_config().await;
 
     // --- Docker agent management ---
-    let _docker_log_handle: Option<tokio::task::JoinHandle<()>> = if cli.docker_agent {
+    let _docker_log_handle: Option<tokio::task::JoinHandle<()>> = if cli.agent.is_docker() {
         tracing::info!(
             "Docker agent mode enabled (engine={}, real_chrome={})",
-            cli.browser_engine,
-            cli.real_chrome
+            cli.agent.docker_engine(),
+            cli.agent.docker_real_chrome()
         );
 
         let skip_build = std::env::var("SKIP_AGENT_BUILD")
@@ -226,8 +557,9 @@ async fn main() {
         match carabistouille::docker::start_container(
             addr.port(),
             tls_config.is_some(),
-            &cli.browser_engine,
-            cli.real_chrome,
+            cli.agent.docker_engine(),
+            cli.agent.docker_real_chrome(),
+            cli.agent.docker_lightpanda(),
             cli.wireguard_config.as_deref(),
         )
         .await {
@@ -241,7 +573,9 @@ async fn main() {
             }
         }
     } else {
-        tracing::info!("Local agent mode (start the agent manually or use --docker-agent)");
+        tracing::info!(
+            "Local agent mode (start the agent manually or use --agent docker)"
+        );
         None
     };
 
@@ -262,32 +596,104 @@ async fn main() {
         });
     }
 
-    // Register shutdown handler to clean up the Docker container
-    let docker_agent_enabled = cli.docker_agent;
+    let docker_agent_enabled = cli.agent.is_docker();
+    let use_tls = tls_config.is_some();
+
+    // Single shutdown gate: Ctrl+C and SIGTERM (Unix) both notify this. Main task selects on it.
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+
+    // Spawn: Ctrl+C (SIGINT) → notify shutdown
+    let shutdown_ctrl_c = shutdown.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ctrl-c");
-        if docker_agent_enabled {
-            carabistouille::docker::stop_container().await;
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                tracing::info!("Ctrl+C received — shutting down");
+                shutdown_ctrl_c.notify_waiters();
+            }
+            Err(e) => tracing::error!(error = %e, "Failed to listen for Ctrl+C"),
         }
-        std::process::exit(0);
     });
 
-    if let Some(tls_config) = tls_config {
+    // Spawn (Unix only): SIGTERM → notify shutdown
+    #[cfg(unix)]
+    {
+        let shutdown_sigterm = shutdown.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sig = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!(error = %e, "SIGTERM listener not installed");
+                    return;
+                }
+            };
+            if sig.recv().await.is_some() {
+                tracing::info!("SIGTERM received — shutting down");
+                shutdown_sigterm.notify_waiters();
+            }
+        });
+    }
+
+    // Start server in a task: HTTP with graceful shutdown, or TLS (no built-in graceful shutdown)
+    let shutdown_for_graceful = shutdown.clone();
+    let mut server_handle = if let Some(cfg) = tls_config {
+        let addr = addr;
+        let app = app.clone();
         tracing::info!("Server listening on https://{}", addr);
-        axum_server::bind_rustls(addr, tls_config)
-            .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        tokio::spawn(async move {
+            axum_server::bind_rustls(addr, cfg)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .unwrap();
+        })
+    } else {
+        let addr = addr;
+        let app = app.clone();
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let shutdown_owned = shutdown_for_graceful.clone();
+        tracing::info!("Server listening on http://{} (no TLS)", addr);
+        tokio::spawn(async move {
+            let shutdown_fut = async move { shutdown_owned.notified().await };
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(shutdown_fut)
             .await
             .unwrap();
-    } else {
-        tracing::info!("Server listening on http://{} (no TLS)", addr);
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .await
-        .unwrap();
+        })
+    };
+
+    tokio::select! {
+        biased;
+
+        // Shutdown requested (Ctrl+C or SIGTERM): wait for server to stop, run cleanup, then exit
+        _ = shutdown.notified() => {
+            tracing::info!("Shutdown in progress…");
+            if use_tls {
+                // TLS server has no graceful shutdown; do not block on it
+                drop(server_handle);
+            } else {
+                // HTTP: server is draining; wait for it to finish
+                match server_handle.await {
+                    Ok(()) => tracing::info!("Server stopped"),
+                    Err(e) => tracing::debug!(error = %e, "Server task join error"),
+                }
+            }
+            run_cleanup(docker_agent_enabled, baliverne_for_cleanup.as_ref()).await;
+            tracing::info!("Shutdown complete");
+            if use_tls {
+                std::process::exit(0);
+            }
+        }
+
+        // Server exited on its own (e.g. bind error or panic)
+        res = &mut server_handle => {
+            if let Err(e) = res {
+                tracing::error!(error = %e, "Server task panicked or failed");
+                run_cleanup(docker_agent_enabled, baliverne_for_cleanup.as_ref()).await;
+                std::process::exit(1);
+            }
+        }
     }
 }

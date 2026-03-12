@@ -1,11 +1,12 @@
 //! REST API handlers: status, create/list/get/stop/delete analyses, get screenshots, VirusTotal.
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     Json,
 };
 use base64::Engine;
@@ -13,7 +14,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::{Analysis, AnalysisRunOptions, AnalysisStatus};
+use crate::models::{Analysis, AnalysisListItem, AnalysisRunOptions, AnalysisStatus};
 use crate::protocol::AgentCommand;
 use crate::state::{AppState, DEFAULT_ANALYSIS_TIMEOUT_SECS};
 
@@ -62,28 +63,78 @@ pub struct CreateAnalysisResponse {
     pub status: AnalysisStatus,
 }
 
-/// GET /api/status — agent connected flag, run mode, chrome mode, and total analyses count.
-pub async fn get_status(State(state): State<AppState>) -> Json<serde_json::Value> {
+/// GET /api/status — agent connected flag, run mode, chrome mode, stream/codec/input info, ICE servers (when Baliverne), analyses count.
+pub async fn get_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let agent_backend = if state.baliverne.is_some() {
+        "baliverne"
+    } else {
+        "builtin"
+    };
     let run_mode = if state.docker_agent { "docker" } else { "local" };
     let chrome_mode: Option<&str> = if state.docker_agent {
-        Some(if state.real_chrome { "real" } else { "headless" })
+        Some(if state.lightpanda {
+            "lightpanda"
+        } else if state.real_chrome {
+            "real"
+        } else {
+            "headless"
+        })
     } else {
         None
     };
-    Json(serde_json::json!({
-        "agent_connected": state.agent_connected.load(Ordering::Relaxed),
+    let request_host = headers
+        .get("host")
+        .and_then(|v: &axum::http::HeaderValue| v.to_str().ok())
+        .map(|s: &str| s.split(':').next().unwrap_or(s));
+    let mut payload = serde_json::json!({
+        "agent_connected": state.agent_connected.load(Ordering::Relaxed) || state.baliverne.is_some(),
+        "agent_backend": agent_backend,
         "run_mode": run_mode,
         "chrome_mode": chrome_mode,
         "analyses_count": state.analyses.len(),
-    }))
+    });
+    // Stream/video/input info and ICE servers (STUN/TURN) for UI when Baliverne
+    if let Some(ref b) = state.baliverne {
+        let c = &b.config;
+        let browser_name = match c.browser {
+            crate::baliverne::state::BrowserKind::Chrome => "chrome",
+            crate::baliverne::state::BrowserKind::Firefox => "firefox",
+        };
+        payload["baliverne_browser"] = serde_json::json!(browser_name);
+        let input_method = if c.neko_input_socket.is_some() {
+            "neko"
+        } else {
+            "xtest"
+        };
+        payload["stream"] = serde_json::json!({
+            "video": "webrtc",
+            "codec": c.video_codec,
+            "fps": c.rtp_fps,
+            "input": input_method,
+        });
+        let ice_servers = crate::baliverne::api::ice::build_ice_servers(&state, request_host);
+        payload["ice_servers"] = serde_json::json!(ice_servers);
+    } else {
+        payload["stream"] = serde_json::json!({
+            "video": "screencast",
+            "codec": null,
+            "fps": null,
+            "input": "puppeteer",
+        });
+    }
+    Json(payload)
 }
 
-/// POST /api/analyses — create analysis, send Navigate to agent, return 201 or 503 if no agent.
+/// POST /api/analyses — create analysis, send Navigate to agent (or start Baliverne session), return 201 or 503 if no agent.
 pub async fn create_analysis(
     State(state): State<AppState>,
     Json(req): Json<CreateAnalysisRequest>,
 ) -> Result<(StatusCode, Json<CreateAnalysisResponse>), (StatusCode, String)> {
-    if !state.agent_connected.load(Ordering::Relaxed) {
+    let use_baliverne = state.baliverne.is_some();
+    if !use_baliverne && !state.agent_connected.load(Ordering::Relaxed) {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             "No agent connected".to_string(),
@@ -135,32 +186,100 @@ pub async fn create_analysis(
     state.analyses.insert(id.clone(), analysis.clone());
     state.persist_analysis(analysis);
 
-    let _ = state.agent_cmd_tx.send(AgentCommand::Navigate {
-        analysis_id: id.clone(),
-        url: req.url.clone(),
-        proxy: req.proxy.clone(),
-        user_agent: req.user_agent.clone(),
-        timezone_id: req.timezone_id.clone(),
-        locale: req.locale.clone(),
-        latitude: req.latitude,
-        longitude: req.longitude,
-        accuracy: req.accuracy,
-        viewport_width: req.viewport_width,
-        viewport_height: req.viewport_height,
-        device_scale_factor: req.device_scale_factor,
-        is_mobile: req.is_mobile,
-        network_throttling: req.network_throttling.clone(),
-    });
+    if use_baliverne {
+        // Baliverne agent: create room, start container, store mapping. Navigate is sent when runtime connects.
+        let baliverne = state.baliverne.as_ref().unwrap().clone();
+        let analysis_to_baliverne = state.analysis_to_baliverne.as_ref().unwrap().clone();
+        let baliverne_room_to_analysis = state.baliverne_room_to_analysis.as_ref().unwrap().clone();
+        let room_id = uuid::Uuid::new_v4();
+        let session_id = uuid::Uuid::new_v4();
+        let (tx, _) = tokio::sync::broadcast::channel(32);
+        let browser = baliverne.config.browser;
+        let room = crate::baliverne::state::Room {
+            id: room_id,
+            session_id,
+            browser,
+            container_id: None,
+            tx,
+            runtime_tx: None,
+            rtp_tx: None,
+            viewer_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        baliverne.add_room(room).await;
+        let webrtc_rtp = {
+            let (start, end) = (
+                baliverne.config.webrtc_rtp_port_start,
+                baliverne.config.webrtc_rtp_port_end,
+            );
+            match crate::baliverne::webrtc_stream::allocate_rtp_socket(start, end).await {
+                Ok((socket, port)) => {
+                    let rtp_host = baliverne
+                        .config
+                        .public_host
+                        .as_deref()
+                        .and_then(|s| s.split(':').next())
+                        .unwrap_or("host.docker.internal")
+                        .to_string();
+                    crate::baliverne::webrtc_stream::spawn_rtp_receiver(baliverne.clone(), room_id, socket);
+                    Some((rtp_host, port))
+                }
+                Err(e) => {
+                    tracing::warn!(%room_id, error = %e, "Baliverne: WebRTC RTP allocation failed");
+                    None
+                }
+            }
+        };
+        if let Ok(cid) = baliverne
+            .docker
+            .start_session(session_id, browser, webrtc_rtp)
+            .await
+        {
+            baliverne.set_room_container(room_id, cid).await;
+        }
+        analysis_to_baliverne.insert(id.clone(), (room_id, session_id));
+        baliverne_room_to_analysis.insert(room_id, id.clone());
+    } else {
+        let _ = state.agent_cmd_tx.send(AgentCommand::Navigate {
+            analysis_id: id.clone(),
+            url: req.url.clone(),
+            proxy: req.proxy.clone(),
+            user_agent: req.user_agent.clone(),
+            timezone_id: req.timezone_id.clone(),
+            locale: req.locale.clone(),
+            latitude: req.latitude,
+            longitude: req.longitude,
+            accuracy: req.accuracy,
+            viewport_width: req.viewport_width,
+            viewport_height: req.viewport_height,
+            device_scale_factor: req.device_scale_factor,
+            is_mobile: req.is_mobile,
+            network_throttling: req.network_throttling.clone(),
+        });
+    }
 
     // Force-stop analysis after 5 minutes if still running
     let state_timeout = state.clone();
     let analysis_id_timeout = id.clone();
     let cmd_tx = state.agent_cmd_tx.clone();
+    let analysis_to_baliverne_timeout = state.analysis_to_baliverne.clone();
+    let baliverne_timeout = state.baliverne.clone();
     let handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(DEFAULT_ANALYSIS_TIMEOUT_SECS)).await;
-        let _ = cmd_tx.send(AgentCommand::StopAnalysis {
-            analysis_id: analysis_id_timeout.clone(),
-        });
+        if let (Some(ref m), Some(ref baliverne)) = (analysis_to_baliverne_timeout.as_ref(), baliverne_timeout.as_ref()) {
+            if let Some(guard) = m.get(&analysis_id_timeout) {
+                let (room_id, _) = *guard;
+                if let Some(room) = baliverne.get_room(room_id).await {
+                    if let Some(ref tx) = room.runtime_tx {
+                        let stop = serde_json::json!({ "type": "stop_analysis" });
+                        let _ = tx.send(serde_json::to_vec(&stop).unwrap_or_default()).await;
+                    }
+                }
+            }
+        } else {
+            let _ = cmd_tx.send(AgentCommand::StopAnalysis {
+                analysis_id: analysis_id_timeout.clone(),
+            });
+        }
         state_timeout.cancel_analysis_timeout(&analysis_id_timeout);
     });
     state.analysis_timeouts.insert(id.clone(), handle);
@@ -175,20 +294,46 @@ pub async fn create_analysis(
     ))
 }
 
-/// GET /api/analyses — list all analyses (newest first), without screenshot/timeline payloads.
-pub async fn list_analyses(State(state): State<AppState>) -> Json<Vec<Analysis>> {
-    let mut analyses: Vec<Analysis> = state
+/// GET /api/analyses — list all analyses (newest first). Returns lightweight items (no report/screenshot) for fast overview; full data is loaded on GET /api/analyses/:id when user opens one.
+pub async fn list_analyses(State(state): State<AppState>) -> Json<Vec<AnalysisListItem>> {
+    let mut items: Vec<AnalysisListItem> = state
         .analyses
         .iter()
         .map(|entry| {
-            let mut a = entry.value().clone();
-            a.screenshot = None;
-            a.screenshot_timeline = Vec::new();
-            a
+            let a = entry.value();
+            let (risk_score, network_request_count, scripts_count, redirect_count, has_clipboard, has_mixed_content) =
+                a.report.as_ref().map_or(
+                    (None, 0u32, 0u32, 0u32, false, false),
+                    |r| {
+                        (
+                            Some(r.risk_score),
+                            r.network_requests.len() as u32,
+                            r.scripts.len() as u32,
+                            r.redirect_chain.len() as u32,
+                            !r.clipboard_reads.is_empty(),
+                            r.security.has_mixed_content,
+                        )
+                    },
+                );
+            AnalysisListItem {
+                id: a.id.clone(),
+                url: a.url.clone(),
+                status: a.status.clone(),
+                created_at: a.created_at,
+                completed_at: a.completed_at,
+                notes: a.notes.clone(),
+                tags: a.tags.clone(),
+                risk_score,
+                network_request_count,
+                scripts_count,
+                redirect_count,
+                has_clipboard,
+                has_mixed_content,
+            }
         })
         .collect();
-    analyses.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    Json(analyses)
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(items)
 }
 
 /// GET /api/analyses/:id — full analysis + report; includes last screenshot for complete/error.
@@ -372,11 +517,15 @@ pub async fn get_virustotal(
     }))
 }
 
+/// Time we wait for the Baliverne container to stop before returning from stop_analysis.
+const BALIVERNE_STOP_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// POST /api/analyses/:id/stop — send StopAnalysis to agent; 202 accepted or 404/409.
 pub async fn stop_analysis(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    tracing::debug!(%id, "stop_analysis: entry");
     let analysis = state
         .analyses
         .get(&id)
@@ -385,6 +534,7 @@ pub async fn stop_analysis(
     match analysis.status {
         AnalysisStatus::Pending | AnalysisStatus::Running => {}
         _ => {
+            tracing::debug!(%id, status = ?analysis.status, "stop_analysis: already finished");
             return Err((
                 StatusCode::CONFLICT,
                 format!("Analysis is already {}", serde_json::to_string(&analysis.status).unwrap_or_default()),
@@ -393,9 +543,58 @@ pub async fn stop_analysis(
     }
     drop(analysis);
 
-    let _ = state.agent_cmd_tx.send(AgentCommand::StopAnalysis {
+    // Resolve Baliverne mapping first so we can stop the container even if the room is removed before we await stop.
+    let baliverne_mapping = state
+        .analysis_to_baliverne
+        .as_ref()
+        .and_then(|m| m.get(&id))
+        .map(|guard| *guard);
+
+    // Baliverne runtimes are not subscribed to agent_cmd_tx; send stop directly to the container's runtime channel.
+    let stop_cmd = AgentCommand::StopAnalysis {
         analysis_id: id.clone(),
-    });
+    };
+    let sent_to_baliverne = crate::api::ws::send_viewer_command_to_agent(&state, &id, &stop_cmd).await;
+    tracing::debug!(%id, sent_to_baliverne, "stop_analysis: stop command sent");
+    if !sent_to_baliverne {
+        let _ = state.agent_cmd_tx.send(stop_cmd);
+        tracing::trace!(%id, "stop_analysis: sent via agent_cmd_tx");
+    }
+
+    // For Baliverne: always stop the container in this request (await with timeout). Use room.container_id or fallback to container name from session_id.
+    if let Some((room_id, session_id)) = baliverne_mapping {
+        if let Some(ref baliverne) = state.baliverne {
+            let baliverne = baliverne.clone();
+            let container_id_or_name = baliverne
+                .get_room(room_id)
+                .await
+                .and_then(|r| r.container_id)
+                .unwrap_or_else(|| format!("baliverne-{}", session_id.as_simple()));
+            tracing::info!(%id, container = %container_id_or_name, "stop_analysis: stopping Baliverne container now");
+            match tokio::time::timeout(
+                BALIVERNE_STOP_TIMEOUT,
+                baliverne.docker.stop_container(&container_id_or_name),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    tracing::info!(%container_id_or_name, "stop_analysis: Baliverne container stopped");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(%container_id_or_name, error = %e, "stop_analysis: Baliverne container stop failed");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        %container_id_or_name,
+                        "stop_analysis: Baliverne container stop timed out after {:?}",
+                        BALIVERNE_STOP_TIMEOUT
+                    );
+                }
+            }
+        }
+        // Baliverne runtime is stopped and may not have sent analysis_complete; mark complete and push to viewers so the UI stops handling input.
+        crate::api::ws::mark_analysis_complete_and_forward(&state, &id);
+    }
     state.cancel_analysis_timeout(&id);
 
     Ok(StatusCode::ACCEPTED)

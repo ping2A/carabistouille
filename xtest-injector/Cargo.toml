@@ -1,0 +1,13 @@
+[package]
+name = "xtest-injector"
+version = "0.1.0"
+edition = "2021"
+description = "X11 XTest-based input injector for Baliverne (one process, one X connection; no spawn per event)"
+license = "Apache-2.0"
+
+[[bin]]
+name = "xtest-injector"
+path = "src/main.rs"
+
+[dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }

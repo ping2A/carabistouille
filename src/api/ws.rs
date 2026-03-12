@@ -1,6 +1,7 @@
 //! WebSocket handlers: agent connection (commands out, events in) and viewer connection (events out).
 
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use axum::{
     extract::{
@@ -11,9 +12,12 @@ use axum::{
 };
 use futures::{SinkExt, StreamExt};
 use tokio::sync::broadcast;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 
 use std::time::Duration;
 
+use crate::baliverne::webrtc_viewer;
 use crate::models::AnalysisStatus;
 use crate::protocol::{AgentCommand, AgentEvent};
 use crate::state::{AppState, MCP_NO_DATA_DELAY_SECS};
@@ -91,12 +95,128 @@ async fn handle_agent_connection(socket: WebSocket, state: AppState) {
     tracing::info!("Agent disconnected");
 }
 
+/// Called from Baliverne runtime handler: rewrite session_id to analysis_id and process event.
+pub(crate) async fn handle_agent_event_from_baliverne(
+    state: &AppState,
+    analysis_id: &str,
+    event_json: &[u8],
+) {
+    tracing::debug!(%analysis_id, len = event_json.len(), "handle_agent_event_from_baliverne: entry");
+    let mut value: serde_json::Value = match serde_json::from_slice(event_json) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::debug!(%analysis_id, error = %e, "handle_agent_event_from_baliverne: parse slice failed");
+            return;
+        }
+    };
+    value["analysis_id"] = serde_json::json!(analysis_id);
+    let new_json = value.to_string();
+    let event_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("?");
+    match serde_json::from_str::<AgentEvent>(&new_json) {
+        Ok(event) => {
+            tracing::debug!(%analysis_id, event_type = event_type, "handle_agent_event_from_baliverne: parsed as AgentEvent");
+            let is_agent_ready = matches!(&event, AgentEvent::AgentReady);
+            handle_agent_event(state, event).await;
+            // When runtime reports ready, send the user-requested URL so the remote browser opens it.
+            if is_agent_ready {
+                tracing::debug!(%analysis_id, "handle_agent_event_from_baliverne: agent_ready, sending navigate");
+                send_navigate_to_baliverne_runtime(state, analysis_id).await;
+            }
+        }
+        Err(_) => {
+            tracing::debug!(%analysis_id, event_type = event_type, "handle_agent_event_from_baliverne: forwarding raw to viewer");
+            forward_raw_to_viewer(state, analysis_id, &new_json);
+        }
+    }
+}
+
+/// Send Navigate (analysis URL) to the Baliverne runtime for this analysis. No-op if not Baliverne or no room.
+async fn send_navigate_to_baliverne_runtime(state: &AppState, analysis_id: &str) {
+    tracing::debug!(%analysis_id, "send_navigate_to_baliverne_runtime: entry");
+    let analysis = match state.analyses.get(analysis_id) {
+        Some(a) => a,
+        None => {
+            tracing::debug!(%analysis_id, "send_navigate_to_baliverne_runtime: no analysis found");
+            return;
+        }
+    };
+    let baliverne = match state.baliverne.as_ref() {
+        Some(b) => b.clone(),
+        None => {
+            tracing::debug!(%analysis_id, "send_navigate_to_baliverne_runtime: Baliverne not enabled");
+            return;
+        }
+    };
+    let (room_id, _) = match state.analysis_to_baliverne.as_ref().and_then(|m| m.get(analysis_id)) {
+        Some(guard) => *guard,
+        None => {
+            tracing::debug!(%analysis_id, "send_navigate_to_baliverne_runtime: no room for analysis");
+            return;
+        }
+    };
+    let room = match baliverne.get_room(room_id).await {
+        Some(r) => r,
+        None => {
+            tracing::debug!(%analysis_id, %room_id, "send_navigate_to_baliverne_runtime: room not found");
+            return;
+        }
+    };
+    let tx = match room.runtime_tx.as_ref() {
+        Some(t) => t.clone(),
+        None => {
+            tracing::debug!(%analysis_id, %room_id, "send_navigate_to_baliverne_runtime: no runtime_tx");
+            return;
+        }
+    };
+    let run_options = analysis.run_options.as_ref();
+    let cmd = AgentCommand::Navigate {
+        analysis_id: analysis_id.to_string(),
+        url: analysis.url.clone(),
+        proxy: run_options.and_then(|o| o.proxy.clone()),
+        user_agent: run_options.and_then(|o| o.user_agent.clone()),
+        timezone_id: run_options.and_then(|o| o.timezone_id.clone()),
+        locale: run_options.and_then(|o| o.locale.clone()),
+        latitude: run_options.and_then(|o| o.latitude),
+        longitude: run_options.and_then(|o| o.longitude),
+        accuracy: run_options.and_then(|o| o.accuracy),
+        viewport_width: run_options.and_then(|o| o.viewport_width),
+        viewport_height: run_options.and_then(|o| o.viewport_height),
+        device_scale_factor: run_options.and_then(|o| o.device_scale_factor),
+        is_mobile: run_options.and_then(|o| o.is_mobile),
+        network_throttling: run_options.and_then(|o| o.network_throttling.clone()),
+    };
+    let bytes = adapt_cmd_to_baliverne(&cmd);
+    if tx.send(bytes).await.is_err() {
+        tracing::debug!(%analysis_id, "could not send navigate to runtime (channel closed)");
+    } else {
+        tracing::info!(%analysis_id, url = %analysis.url, "sent navigate to Baliverne runtime");
+    }
+}
+
 /// Update server state from an agent event and forward the event to any viewers for that analysis.
-async fn handle_agent_event(state: &AppState, event: AgentEvent) {
+pub(crate) async fn handle_agent_event(state: &AppState, event: AgentEvent) {
+    tracing::debug!(event_type = %event.type_name(), "handle_agent_event: entry");
     match &event {
         AgentEvent::Screenshot {
             analysis_id, data, ..
         } => {
+            let is_baliverne = state
+                .analysis_to_baliverne
+                .as_ref()
+                .map(|m| m.contains_key(analysis_id))
+                .unwrap_or(false);
+            if is_baliverne {
+                // Baliverne uses WebRTC/RTP for video; do not store or forward screenshot over WebSocket.
+                if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+                    if analysis.status == AnalysisStatus::Pending {
+                        analysis.status = AnalysisStatus::Running;
+                        if let Some(a) = state.analyses.get(analysis_id) {
+                            state.persist_analysis(a.clone());
+                        }
+                    }
+                }
+                return;
+            }
             tracing::debug!(
                 "Screenshot for {} ({} KB base64)",
                 analysis_id,
@@ -471,7 +591,8 @@ async fn handle_agent_event(state: &AppState, event: AgentEvent) {
 const SCREENSHOT_FORWARD_INTERVAL_MS: f64 = 400.0;
 
 /// Serialize the event and send it to all viewers subscribed to this analysis.
-fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {
+pub(crate) fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {
+    tracing::trace!(%analysis_id, event_type = %event.type_name(), "forward_to_viewer: entry");
     let viewer_tx = state.get_viewer_tx(analysis_id);
     if let Ok(json) = serde_json::to_string(event) {
         match viewer_tx.send(json) {
@@ -495,9 +616,107 @@ fn forward_to_viewer(state: &AppState, analysis_id: &str, event: &AgentEvent) {
 }
 
 /// Forward raw JSON to viewers (e.g. when event did not parse as AgentEvent).
-fn forward_raw_to_viewer(state: &AppState, analysis_id: &str, json: &str) {
+pub(crate) fn forward_raw_to_viewer(state: &AppState, analysis_id: &str, json: &str) {
+    tracing::trace!(%analysis_id, len = json.len(), "forward_raw_to_viewer: entry");
     let viewer_tx = state.get_viewer_tx(analysis_id);
     let _ = viewer_tx.send(json.to_string());
+}
+
+/// Mark analysis as Complete and forward analysis_complete to viewers. Used when stop is triggered (e.g. Baliverne) and the runtime did not send analysis_complete.
+pub(crate) fn mark_analysis_complete_and_forward(state: &AppState, analysis_id: &str) {
+    let report = if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
+        analysis.status = AnalysisStatus::Complete;
+        analysis.completed_at = Some(chrono::Utc::now());
+        analysis.report.clone().unwrap_or_default()
+    } else {
+        return;
+    };
+    if let Some(a) = state.analyses.get(analysis_id) {
+        state.persist_analysis(a.clone());
+    }
+    let event = AgentEvent::AnalysisComplete {
+        analysis_id: analysis_id.to_string(),
+        report,
+    };
+    tracing::info!(%analysis_id, "mark_analysis_complete_and_forward: forwarding analysis_complete to viewers");
+    forward_to_viewer(state, analysis_id, &event);
+}
+
+/// If this analysis is backed by Baliverne, send the command to the runtime (adapted format). Returns true if sent to Baliverne.
+pub(crate) async fn send_viewer_command_to_agent(
+    state: &AppState,
+    analysis_id: &str,
+    cmd: &AgentCommand,
+) -> bool {
+    tracing::debug!(%analysis_id, cmd_type = %cmd.type_name(), "send_viewer_command_to_agent: entry");
+    // Do not forward commands for analyses that are already finished (e.g. user clicked Finish; container stopped).
+    if let Some(analysis) = state.analyses.get(analysis_id) {
+        if analysis.status != AnalysisStatus::Running && analysis.status != AnalysisStatus::Pending {
+            tracing::trace!(%analysis_id, status = ?analysis.status, "send_viewer_command_to_agent: analysis not running, skip");
+            return false;
+        }
+    }
+    let baliverne = match state.baliverne.as_ref() {
+        Some(b) => b.clone(),
+        None => {
+            tracing::trace!(%analysis_id, "send_viewer_command_to_agent: Baliverne not enabled");
+            return false;
+        }
+    };
+    let (room_id, _) = match state.analysis_to_baliverne.as_ref().and_then(|m| m.get(analysis_id)) {
+        Some(guard) => *guard,
+        None => {
+            tracing::trace!(%analysis_id, "send_viewer_command_to_agent: no room for analysis");
+            return false;
+        }
+    };
+    let room = match baliverne.get_room(room_id).await {
+        Some(r) => r,
+        None => {
+            tracing::debug!(%analysis_id, %room_id, "send_viewer_command_to_agent: room not found");
+            return false;
+        }
+    };
+    let tx = match room.runtime_tx.as_ref() {
+        Some(t) => t.clone(),
+        None => {
+            tracing::debug!(%analysis_id, %room_id, "send_viewer_command_to_agent: no runtime_tx");
+            return false;
+        }
+    };
+    let bytes = adapt_cmd_to_baliverne(cmd);
+    tracing::debug!(%analysis_id, bytes_len = bytes.len(), "send_viewer_command_to_agent: sending via try_send");
+    // Non-blocking: avoid blocking HTTP handler if runtime is slow or channel full
+    if tx.try_send(bytes).is_err() {
+        tracing::debug!(%analysis_id, "runtime command channel full or closed, stop may not reach container");
+    } else {
+        tracing::trace!(%analysis_id, "send_viewer_command_to_agent: sent");
+    }
+    true
+}
+
+/// Convert Carabistouille AgentCommand to Baliverne runtime JSON (no analysis_id, dx/dy for scroll, mousemove).
+fn adapt_cmd_to_baliverne(cmd: &AgentCommand) -> Vec<u8> {
+    tracing::trace!(cmd_type = %cmd.type_name(), "adapt_cmd_to_baliverne: entry");
+    let value = match cmd {
+        AgentCommand::Navigate { url, proxy, user_agent, .. } => {
+            serde_json::json!({ "type": "navigate", "url": url, "proxy": proxy, "user_agent": user_agent })
+        }
+        AgentCommand::Click { x, y, .. } => serde_json::json!({ "type": "click", "x": x, "y": y }),
+        AgentCommand::Scroll { delta_x, delta_y, .. } => {
+            serde_json::json!({ "type": "scroll", "dx": delta_x, "dy": delta_y })
+        }
+        AgentCommand::MoveMouse { x, y, .. } => {
+            serde_json::json!({ "type": "mousemove", "x": x, "y": y })
+        }
+        AgentCommand::TypeText { text, .. } => serde_json::json!({ "type": "type_text", "text": text }),
+        AgentCommand::KeyPress { key, .. } => serde_json::json!({ "type": "key_press", "key": key }),
+        AgentCommand::InspectElement { x, y, .. } => {
+            serde_json::json!({ "type": "inspect_element", "x": x, "y": y })
+        }
+        AgentCommand::StopAnalysis { .. } => serde_json::json!({ "type": "stop_analysis" }),
+    };
+    serde_json::to_vec(&value).unwrap_or_default()
 }
 
 /// WebSocket upgrade for /ws/viewer/:id. Viewer receives events for that analysis; can send click/scroll/stop etc.
@@ -506,11 +725,13 @@ pub async fn viewer_ws_handler(
     Path(analysis_id): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    tracing::debug!(%analysis_id, "viewer_ws_handler: upgrade requested");
     ws.on_upgrade(move |socket| handle_viewer_connection(socket, analysis_id, state))
 }
 
 /// Run the viewer connection: send report_snapshot + last screenshot + timeline notice, then forward all events; handle incoming commands.
 async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state: AppState) {
+    tracing::debug!(%analysis_id, "handle_viewer_connection: started");
     tracing::info!("Viewer connected for analysis {}", analysis_id);
 
     if !state.analyses.contains_key(&analysis_id) {
@@ -519,6 +740,12 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
     }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let is_baliverne = state
+        .analysis_to_baliverne
+        .as_ref()
+        .map(|m| m.contains_key(&analysis_id))
+        .unwrap_or(false);
 
     // Send a snapshot of the current report so the viewer doesn't miss
     // events that arrived before the WS connection was established.
@@ -538,26 +765,35 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
                 let _ = ws_tx.send(Message::Text(json)).await;
             }
         }
-        // Send the latest screenshot so the viewer can display it
-        // (especially for completed/error analyses where no new screenshots arrive)
-        if let Some(ref screenshot) = analysis.screenshot {
-            let ss_msg = serde_json::json!({
-                "type": "screenshot",
-                "analysis_id": analysis_id,
-                "data": screenshot,
-            });
-            if let Ok(json) = serde_json::to_string(&ss_msg) {
-                let _ = ws_tx.send(Message::Text(json)).await;
+        // For Baliverne, video is via WebRTC/RTP — do not send screenshot. Send stream_mode so UI uses WebRTC viewport.
+        if !is_baliverne {
+            if let Some(ref screenshot) = analysis.screenshot {
+                let ss_msg = serde_json::json!({
+                    "type": "screenshot",
+                    "analysis_id": analysis_id,
+                    "data": screenshot,
+                });
+                if let Ok(json) = serde_json::to_string(&ss_msg) {
+                    let _ = ws_tx.send(Message::Text(json)).await;
+                }
             }
-        }
-        // Notify about available screenshot timeline count
-        if !analysis.screenshot_timeline.is_empty() {
-            let ts_msg = serde_json::json!({
-                "type": "screenshot_timeline_available",
+            if !analysis.screenshot_timeline.is_empty() {
+                let ts_msg = serde_json::json!({
+                    "type": "screenshot_timeline_available",
+                    "analysis_id": analysis_id,
+                    "count": analysis.screenshot_timeline.len(),
+                });
+                if let Ok(json) = serde_json::to_string(&ts_msg) {
+                    let _ = ws_tx.send(Message::Text(json)).await;
+                }
+            }
+        } else {
+            let stream_mode_msg = serde_json::json!({
+                "type": "stream_mode",
                 "analysis_id": analysis_id,
-                "count": analysis.screenshot_timeline.len(),
+                "video": "webrtc",
             });
-            if let Ok(json) = serde_json::to_string(&ts_msg) {
+            if let Ok(json) = serde_json::to_string(&stream_mode_msg) {
                 let _ = ws_tx.send(Message::Text(json)).await;
             }
         }
@@ -565,34 +801,46 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
 
     let viewer_tx = state.get_viewer_tx(&analysis_id);
     let mut viewer_rx = viewer_tx.subscribe();
+    let (sig_tx, mut sig_rx) = tokio::sync::mpsc::channel::<String>(32);
 
     let aid_fwd = analysis_id.clone();
     let fwd_task = tokio::spawn(async move {
         loop {
-            match viewer_rx.recv().await {
-                Ok(json) => {
-                    let len = json.len();
-                    if ws_tx.send(Message::Text(json)).await.is_err() {
-                        tracing::debug!("Viewer WS send failed for {}, closing", aid_fwd);
+            tokio::select! {
+                recv_result = viewer_rx.recv() => match recv_result {
+                    Ok(json) => {
+                        let len = json.len();
+                        if ws_tx.send(Message::Text(json)).await.is_err() {
+                            tracing::debug!("Viewer WS send failed for {}, closing", aid_fwd);
+                            break;
+                        }
+                        tracing::trace!("Sent {} bytes to viewer for {}", len, aid_fwd);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("Viewer for {} lagged, skipped {} messages", aid_fwd, n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::debug!("Viewer broadcast closed for {}", aid_fwd);
                         break;
                     }
-                    tracing::trace!("Sent {} bytes to viewer for {}", len, aid_fwd);
+                },
+                Some(sig_msg) = sig_rx.recv() => {
+                    if ws_tx.send(Message::Text(sig_msg)).await.is_err() {
+                        tracing::debug!("Viewer WS send (sig) failed for {}, closing", aid_fwd);
+                        break;
+                    }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(
-                        "Viewer for {} lagged, skipped {} messages — continuing",
-                        aid_fwd,
-                        n
-                    );
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    tracing::debug!("Viewer broadcast closed for {}", aid_fwd);
-                    break;
-                }
+                else => break,
             }
         }
     });
+
+    let mut webrtc_pc: Option<Arc<webrtc::peer_connection::RTCPeerConnection>> = None;
+    let mut webrtc_forward_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let baliverne_room_id = state
+        .analysis_to_baliverne
+        .as_ref()
+        .and_then(|m| m.get(&analysis_id).map(|r| r.0));
 
     let aid = analysis_id.clone();
     while let Some(Ok(msg)) = ws_rx.next().await {
@@ -602,6 +850,49 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
                     .get("type")
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
+
+                // WebRTC signaling (Baliverne viewer)
+                if cmd_type == "webrtc_request_offer" {
+                    if webrtc_pc.is_some() {
+                        tracing::debug!("WebRTC offer already created for {}, ignoring", aid);
+                    } else if let Some(room_id) = baliverne_room_id {
+                        match webrtc_viewer::handle_webrtc_request_offer(&state, room_id, &sig_tx).await {
+                            Ok((pc, handle)) => {
+                                webrtc_pc = pc;
+                                webrtc_forward_handle = handle;
+                            }
+                            Err(e) => tracing::warn!(%aid, error = %e, "WebRTC offer creation failed"),
+                        }
+                    }
+                }
+                if cmd_type == "webrtc_answer" {
+                    if let Some(ref pc) = webrtc_pc {
+                        if let Some(sdp_val) = viewer_cmd.get("sdp") {
+                            let sdp_str = sdp_val.get("sdp").and_then(|s| s.as_str()).unwrap_or("");
+                            if !sdp_str.is_empty() {
+                                match RTCSessionDescription::answer(sdp_str.to_string()) {
+                                    Ok(desc) => {
+                                        if let Err(e) = pc.set_remote_description(desc).await {
+                                            tracing::warn!(%aid, error = %e, "set_remote_description failed");
+                                        }
+                                    }
+                                    Err(e) => tracing::warn!(%aid, error = %e, "invalid answer SDP"),
+                                }
+                            }
+                        }
+                    }
+                }
+                if cmd_type == "webrtc_ice_candidate" {
+                    if let Some(ref pc) = webrtc_pc {
+                        if let Some(cand) = viewer_cmd.get("candidate") {
+                            if let Ok(init) = serde_json::from_value::<RTCIceCandidateInit>(cand.clone()) {
+                                if let Err(e) = pc.add_ice_candidate(init).await {
+                                    tracing::debug!(%aid, error = %e, "add_ice_candidate failed");
+                                }
+                            }
+                        }
+                    }
+                }
 
                 tracing::debug!("Viewer command for {}: {}", aid, cmd_type);
 
@@ -673,6 +964,7 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
                     "stop_analysis" => Some(AgentCommand::StopAnalysis {
                         analysis_id: aid.clone(),
                     }),
+                    "webrtc_request_offer" | "webrtc_answer" | "webrtc_ice_candidate" => None,
                     _ => {
                         tracing::warn!("Unknown viewer command type: {}", cmd_type);
                         None
@@ -680,12 +972,30 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
                 };
 
                 if let Some(cmd) = agent_cmd {
-                    let _ = state.agent_cmd_tx.send(cmd);
+                    let sent = send_viewer_command_to_agent(&state, &aid, &cmd).await;
+                    if !sent {
+                        let _ = state.agent_cmd_tx.send(cmd);
+                    }
                 }
             }
         }
     }
 
-    fwd_task.abort();
+    // Run cleanup in a spawned task so we don't block this handler (WebRTC drop or Baliverne lock
+    // can take time). Returning immediately allows new connections to be accepted.
+    let state_cleanup = state.clone();
+    let room_id_cleanup = baliverne_room_id;
+    tokio::spawn(async move {
+        if let Some(handle) = webrtc_forward_handle.take() {
+            handle.abort();
+        }
+        drop(webrtc_pc.take());
+        if let Some(room_id) = room_id_cleanup {
+            if let Some(ref b) = state_cleanup.baliverne {
+                b.set_room_rtp_tx(room_id, None).await;
+            }
+        }
+        fwd_task.abort();
+    });
     tracing::info!("Viewer disconnected for analysis {}", analysis_id);
 }

@@ -1,0 +1,27 @@
+{
+  "policies": {
+    "BlockAboutConfig": true,
+    "BlockAboutSupport": true,
+    "DisableAppUpdate": true,
+    "DisableFirefoxAccounts": true,
+    "DisableFirefoxScreenshots": true,
+    "DisableTelemetry": true,
+    "DontCheckDefaultBrowser": true,
+    "HardwareAcceleration": false,
+    "NoDefaultBookmarks": true,
+    "OfferToSaveLogins": false,
+    "PasswordManagerEnabled": false,
+    "Preferences": {
+      "browser.tabs.warnOnClose": false,
+      "dom.disable_window_flip": true,
+      "dom.disable_window_move_resize": true,
+      "places.history.enabled": false
+    },
+    "SanitizeOnShutdown": {
+      "Cache": true,
+      "Cookies": true,
+      "History": true,
+      "Sessions": true
+    }
+  }
+}

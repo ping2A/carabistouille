@@ -42,6 +42,10 @@
         <span id="agent-mode" class="agent-mode" style="display:none" aria-hidden="true"></span>
         <span id="agent-engine" class="agent-engine" style="display:none" aria-hidden="true"></span>
       </div>
+      <div id="connection-stats" class="connection-stats" style="display:none" aria-hidden="true" title="Viewer connection: data received/sent and link quality">
+        <span id="connection-stats-bytes" class="connection-stats-bytes">↓ — ↑ —</span>
+        <span id="connection-stats-quality" class="connection-stats-quality"></span>
+      </div>
     </div>
   </header>
 
@@ -117,6 +121,34 @@
           </button>
         </form>
       </section>
+      <section class="network-stream-section" id="network-stream-section">
+        <h2>Network &amp; stream</h2>
+        <div class="network-graph" id="network-graph" aria-hidden="true">
+          <svg viewBox="0 0 280 80" class="network-graph-svg" aria-label="Topology: analyst, server, agent">
+            <defs>
+              <marker id="arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" fill="var(--text-tertiary)"/></marker>
+            </defs>
+            <line x1="40" y1="40" x2="100" y2="40" stroke="var(--text-tertiary)" stroke-width="1.5" marker-end="url(#arrow)"/>
+            <line x1="140" y1="40" x2="200" y2="40" stroke="var(--text-tertiary)" stroke-width="1.5" marker-end="url(#arrow)"/>
+            <rect x="10" y="25" width="60" height="30" rx="4" class="network-node" id="network-node-analyst"/>
+            <rect x="110" y="25" width="60" height="30" rx="4" class="network-node" id="network-node-server"/>
+            <rect x="210" y="25" width="60" height="30" rx="4" class="network-node" id="network-node-agent"/>
+            <text x="40" y="43" text-anchor="middle" class="network-node-label">Analyst</text>
+            <text x="140" y="43" text-anchor="middle" class="network-node-label">Server</text>
+            <text x="240" y="43" text-anchor="middle" class="network-node-label" id="network-label-agent">Agent</text>
+            <text x="70" y="22" text-anchor="middle" class="network-edge-label">WebSocket</text>
+            <text x="170" y="22" text-anchor="middle" class="network-edge-label" id="network-edge-server-agent">WS</text>
+          </svg>
+        </div>
+        <dl class="stream-info" id="stream-info">
+          <dt>Video</dt><dd id="stream-video">—</dd>
+          <dt>Codec</dt><dd id="stream-codec">—</dd>
+          <dt>FPS</dt><dd id="stream-fps">—</dd>
+          <dt>Input</dt><dd id="stream-input">—</dd>
+          <dt>ICE (STUN/TURN)</dt><dd id="stream-ice" class="stream-ice-list">—</dd>
+          <dt>Connection</dt><dd id="sidebar-connection-stats" class="sidebar-connection-stats">—</dd>
+        </dl>
+      </section>
       <section class="analyses-section">
         <h2 data-i18n="app.history">History</h2>
         <div id="tag-filter" class="tag-filter" style="display:none">
@@ -174,6 +206,14 @@
           <p data-i18n="app.placeholderSubmit">Submit a URL to begin analysis</p>
         </div>
         <img id="viewport-img" class="viewport-img" style="display:none" alt="Browser viewport">
+        <div id="viewport-webrtc" class="viewport-webrtc" style="display:none" aria-hidden="true">
+          <div class="viewport-webrtc-waiting" id="viewport-webrtc-waiting">
+            <strong>Waiting for browser…</strong>
+            <span id="viewport-webrtc-waiting-text">The container may still be starting. Video will appear when WebRTC connects.</span>
+          </div>
+          <video id="viewport-video" class="viewport-video" autoplay playsinline muted></video>
+          <div id="viewport-webrtc-placeholder" class="viewport-webrtc-placeholder" style="display:none">WebRTC</div>
+        </div>
         <div id="inspect-highlight" class="inspect-highlight"></div>
       </div>
 

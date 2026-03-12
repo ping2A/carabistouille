@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use crate::db::DbOp;
 use crate::models::Analysis;
@@ -29,8 +30,10 @@ pub struct AppState {
     pub agent_connected: Arc<AtomicBool>,
     /// When true, the agent was started by the server in Docker; /api/status exposes run_mode and chrome_mode.
     pub docker_agent: bool,
-    /// When docker_agent is true: true = real Chrome (headed), false = headless.
+    /// When docker_agent is true: true = real Chrome (headed), false = headless (or lightpanda if lightpanda is true).
     pub real_chrome: bool,
+    /// When docker_agent is true: use Lightpanda browser (CDP) instead of Chromium/Chrome.
+    pub lightpanda: bool,
     /// Per-analysis timeout task: when it fires, server sends StopAnalysis. Aborted when analysis completes or is stopped.
     pub analysis_timeouts: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
     /// For MCP analyses: timer that stops the analysis if no network data after MCP_NO_DATA_DELAY_SECS. Aborted when we get any network request.
@@ -39,6 +42,12 @@ pub struct AppState {
     pub db_tx: Arc<std::sync::mpsc::Sender<DbOp>>,
     /// When true, POST /mcp is enabled for MCP (Model Context Protocol) JSON-RPC.
     pub mcp_enabled: bool,
+    /// When Some, Baliverne agent is enabled: Docker sessions, WebRTC, X11 dummy driver.
+    pub baliverne: Option<Arc<crate::baliverne::state::AppState>>,
+    /// analysis_id -> (room_id, session_id) for Baliverne-backed analyses.
+    pub analysis_to_baliverne: Option<Arc<DashMap<String, (Uuid, Uuid)>>>,
+    /// room_id -> analysis_id for forwarding runtime events to the correct analysis.
+    pub baliverne_room_to_analysis: Option<Arc<DashMap<Uuid, String>>>,
 }
 
 impl AppState {
@@ -50,7 +59,11 @@ impl AppState {
         db_tx: std::sync::mpsc::Sender<DbOp>,
         docker_agent: bool,
         real_chrome: bool,
+        lightpanda: bool,
         mcp_enabled: bool,
+        baliverne: Option<Arc<crate::baliverne::state::AppState>>,
+        analysis_to_baliverne: Option<Arc<DashMap<String, (Uuid, Uuid)>>>,
+        baliverne_room_to_analysis: Option<Arc<DashMap<Uuid, String>>>,
     ) -> Self {
         let (agent_cmd_tx, _) = broadcast::channel(1024);
         let analyses_map = Arc::new(DashMap::new());
@@ -64,10 +77,14 @@ impl AppState {
             agent_connected: Arc::new(AtomicBool::new(false)),
             docker_agent,
             real_chrome,
+            lightpanda,
             analysis_timeouts: Arc::new(DashMap::new()),
             mcp_no_data_timers: Arc::new(DashMap::new()),
             db_tx: Arc::new(db_tx),
             mcp_enabled,
+            baliverne,
+            analysis_to_baliverne,
+            baliverne_room_to_analysis,
         }
     }
 
