@@ -118,6 +118,11 @@
     'admin.deleteAnalysis': { en: 'Delete analysis', fr: 'Supprimer l’analyse', zh: '删除分析' },
     'admin.detailTitle': { en: 'Analysis Details', fr: 'Détails de l’analyse', zh: '分析详情' },
     'admin.deleteConfirm': { en: 'Delete this analysis? It will be removed from the server and the database.', fr: 'Supprimer cette analyse ? Elle sera retirée du serveur et de la base de données.', zh: '确定删除此分析？将从服务器和数据库中移除。' },
+    'admin.cleanupDb': { en: 'Clean up database', fr: 'Vider la base', zh: '清空数据库' },
+    'admin.cleanupDbTitle': { en: 'Delete all analyses from the database', fr: 'Supprimer toutes les analyses de la base', zh: '删除数据库中所有分析' },
+    'admin.cleanupDbConfirm': { en: 'Delete ALL analyses from the database? This cannot be undone.', fr: 'Supprimer TOUTES les analyses de la base ? Cette action est irréversible.', zh: '确定删除数据库中全部分析？此操作不可恢复。' },
+    'admin.searchPlaceholder': { en: 'Search URL, status, verdict…', fr: 'Rechercher URL, statut, verdict…', zh: '搜索 URL、状态、结论…' },
+    'admin.noMatches': { en: 'No matches', fr: 'Aucun résultat', zh: '无匹配' },
     'admin.serverUnreachable': { en: 'Server unreachable', fr: 'Serveur inaccessible', zh: '无法连接服务器' },
 
     // Theme & language

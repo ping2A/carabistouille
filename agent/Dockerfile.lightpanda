@@ -1,0 +1,28 @@
+# Single-container Lightpanda: Lightpanda browser + Carabistouille agent.
+# Lightpanda runs in the background (CDP on 9222); agent connects to ws://127.0.0.1:9222.
+# Build from repo root: docker build --platform linux/amd64 -f agent/Dockerfile.lightpanda -t carabistouille-agent-lightpanda agent/
+FROM --platform=linux/amd64 node:20-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Download Lightpanda nightly (linux amd64). No Chrome needed.
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=1
+RUN wget -q -O /app/lightpanda \
+    "https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux" \
+  && chmod +x /app/lightpanda
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN chmod +x /app/entrypoint-lightpanda.sh
+
+ENV SERVER_URL=ws://host.docker.internal:3000/ws/agent
+ENV BROWSER_WS_ENDPOINT=ws://127.0.0.1:9222
+
+ENTRYPOINT ["./entrypoint-lightpanda.sh"]
+CMD ["node", "src/index.js"]

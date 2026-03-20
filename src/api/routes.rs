@@ -517,8 +517,8 @@ pub async fn get_virustotal(
     }))
 }
 
-/// Time we wait for the Baliverne container to stop before returning from stop_analysis.
-const BALIVERNE_STOP_TIMEOUT: Duration = Duration::from_secs(8);
+/// Time we wait for the Baliverne container to stop and be removed before returning from stop_analysis.
+const BALIVERNE_STOP_TIMEOUT: Duration = Duration::from_secs(12);
 
 /// POST /api/analyses/:id/stop — send StopAnalysis to agent; 202 accepted or 404/409.
 pub async fn stop_analysis(
@@ -557,8 +557,23 @@ pub async fn stop_analysis(
     let sent_to_baliverne = crate::api::ws::send_viewer_command_to_agent(&state, &id, &stop_cmd).await;
     tracing::debug!(%id, sent_to_baliverne, "stop_analysis: stop command sent");
     if !sent_to_baliverne {
-        let _ = state.agent_cmd_tx.send(stop_cmd);
+        let _ = state.agent_cmd_tx.send(stop_cmd.clone());
         tracing::trace!(%id, "stop_analysis: sent via agent_cmd_tx");
+        // Fallback: if the built-in/docker agent does not send analysis_complete (e.g. no session, crash), mark complete after a delay so the UI does not stay "Running".
+        let state_fallback = state.clone();
+        let id_fallback = id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(25)).await;
+            if state_fallback
+                .analyses
+                .get(&id_fallback)
+                .map(|a| a.status == AnalysisStatus::Running)
+                .unwrap_or(false)
+            {
+                tracing::warn!(%id_fallback, "stop_analysis: no analysis_complete from agent within 25s, marking complete");
+                crate::api::ws::mark_analysis_complete_and_forward(&state_fallback, &id_fallback);
+            }
+        });
     }
 
     // For Baliverne: always stop the container in this request (await with timeout). Use room.container_id or fallback to container name from session_id.
@@ -578,7 +593,7 @@ pub async fn stop_analysis(
             .await
             {
                 Ok(Ok(())) => {
-                    tracing::info!(%container_id_or_name, "stop_analysis: Baliverne container stopped");
+                    tracing::info!(%container_id_or_name, "stop_analysis: Baliverne container stopped and removed");
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(%container_id_or_name, error = %e, "stop_analysis: Baliverne container stop failed");
@@ -591,6 +606,18 @@ pub async fn stop_analysis(
                     );
                 }
             }
+            // Remove room and maps so no stale session can reconnect; container is already stopped/removed.
+            if baliverne.remove_room(room_id).await.is_some() {
+                tracing::debug!(%room_id, "stop_analysis: Baliverne room removed");
+            }
+        }
+        if let Some(ref m) = state.analysis_to_baliverne {
+            m.remove(&id);
+            tracing::debug!(%id, "stop_analysis: analysis_to_baliverne entry removed");
+        }
+        if let Some(ref m) = state.baliverne_room_to_analysis {
+            m.remove(&room_id);
+            tracing::debug!(%room_id, "stop_analysis: baliverne_room_to_analysis entry removed");
         }
         // Baliverne runtime is stopped and may not have sent analysis_complete; mark complete and push to viewers so the UI stops handling input.
         crate::api::ws::mark_analysis_complete_and_forward(&state, &id);
@@ -630,9 +657,39 @@ pub async fn delete_analysis(
     if state.analyses.remove(&id).is_some() {
         state.viewer_channels.remove(&id);
         state.cancel_analysis_timeout(&id);
+        state.cancel_mcp_no_data_timer(&id);
+        if let Some(ref m) = state.analysis_to_baliverne {
+            if let Some((_, (room_id, _))) = m.remove(&id) {
+                if let Some(ref r2a) = state.baliverne_room_to_analysis {
+                    r2a.remove(&room_id);
+                }
+            }
+        }
         state.persist_delete(&id);
         StatusCode::NO_CONTENT
     } else {
         StatusCode::NOT_FOUND
     }
+}
+
+/// DELETE /api/analyses — remove all analyses from memory and database (clean up whole DB).
+pub async fn delete_all_analyses(State(state): State<AppState>) -> StatusCode {
+    let ids: Vec<String> = state.analyses.iter().map(|r| r.key().clone()).collect();
+    for id in &ids {
+        state.analyses.remove(id);
+        state.viewer_channels.remove(id);
+        state.cancel_analysis_timeout(id);
+        state.cancel_mcp_no_data_timer(id);
+        state.persist_delete(id);
+    }
+    if let Some(ref m) = state.analysis_to_baliverne {
+        for id in &ids {
+            if let Some((_, (room_id, _))) = m.remove(id) {
+                if let Some(ref r2a) = state.baliverne_room_to_analysis {
+                    r2a.remove(&room_id);
+                }
+            }
+        }
+    }
+    StatusCode::NO_CONTENT
 }

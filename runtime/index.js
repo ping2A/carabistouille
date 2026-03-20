@@ -4,7 +4,7 @@
  * Speaks the Carabistouille-compatible agent protocol (commands in, events out).
  * Env: BALIVERNE_WS_URL, BALIVERNE_SESSION_ID, BALIVERNE_BROWSER (chrome|firefox).
  * Chrome: full browser on X11 (like Neko), capture via GStreamer ximagesrc, input via xdotool.
- * Firefox: full browser on X11 (Neko-style), same GStreamer + xdotool; no Playwright.
+ * Firefox: full browser on X11, launched via Playwright for instrumentation (network, console, navigate); capture via GStreamer, input via xdotool/neko like Chrome.
  *
  * Options: --debug, -d  Enable debug logging (GStreamer capture size, screenshot stats, etc.)
  */
@@ -28,7 +28,9 @@ const CONNECT_RETRIES = parseInt(process.env.BALIVERNE_CONNECT_RETRIES || '10', 
 const CONNECT_RETRY_DELAY_MS = parseInt(process.env.BALIVERNE_CONNECT_RETRY_DELAY_MS || '2000', 10) || 2000;
 const CONNECT_TIMEOUT_MS = parseInt(process.env.BALIVERNE_CONNECT_TIMEOUT_MS || '15000', 10) || 15000;
 
-const VIEWPORT = { width: 1920, height: 1080 };
+const DEFAULT_VIEWPORT = { width: 1920, height: 1080 };
+/** Current viewport (from first navigate run_options); used for launch and screenshots. */
+let currentViewport = { ...DEFAULT_VIEWPORT };
 const GST_CAPTURE_PATH = process.env.BALIVERNE_GST_CAPTURE_PATH || '/tmp/baliverne_frame.jpg';
 const RTP_HOST = process.env.BALIVERNE_RTP_HOST;
 const RTP_PORT = process.env.BALIVERNE_RTP_PORT;
@@ -46,10 +48,15 @@ const XI_TouchEnd = 20;
 let ws;
 let browser;
 let page;
-let firefoxProcess = null;
-let screenshotIntervalId = null; // child process when BROWSER=firefox (Neko-style full app on X11)
-const isChromeFullBrowser = BROWSER === 'chrome'; // Chrome on X11, GStreamer + xdotool
-const isFirefoxFullBrowser = BROWSER === 'firefox'; // Firefox on X11 (Neko-style), same capture/input
+let firefoxProcess = null; // legacy: only set when Firefox is launched without Playwright (unused when instrumented)
+/** Shared across request/response handlers; cleared on each navigate for third-party detection. */
+let networkRequests = [];
+let mainDocumentHost = null;
+/** Set to true after first launch so we only run onBrowserReady once. */
+let browserReadySent = false;
+let screenshotIntervalId = null;
+const isChromeFullBrowser = BROWSER === 'chrome'; // Chrome on X11, Puppeteer + GStreamer + xdotool
+const isFirefoxFullBrowser = BROWSER === 'firefox'; // Firefox on X11, Playwright-instrumented + GStreamer + xdotool
 
 // Mouse coalescing: store only latest mousemove and apply at fixed rate. Avoids blocking the message
 // handler on slow paths (xdotool ~20ms per call) and prevents cursor lag from processing a long queue.
@@ -438,19 +445,28 @@ function startRtpStream() {
 }
 
 async function sendScreenshot() {
-  if (USE_RTP) return; // video via RTP only — do not run GStreamer screencast (avoids conflict with RTP pipeline)
   try {
     let data, format = 'jpeg';
-    if (isChromeFullBrowser) {
-      if (!browser) return; // wait for Chrome to be launched
-      data = captureScreenChrome();
-    } else if (isFirefoxFullBrowser) {
-      if (!firefoxProcess) return; // wait for Firefox to be launched
-      data = captureScreenChrome();
-    } else if (page) {
+    // When USE_RTP (WebRTC video), use page.screenshot() for timeline; avoid GStreamer (used by RTP pipeline).
+    const usePageScreenshot = USE_RTP && page && (isChromeFullBrowser || isFirefoxFullBrowser);
+    if (usePageScreenshot) {
       const buf = await page.screenshot({ type: 'jpeg', quality: 80 });
       data = toBase64(buf);
       format = 'jpeg';
+    } else if (!USE_RTP) {
+      if (isChromeFullBrowser) {
+        if (!browser) return;
+        data = captureScreenChrome();
+      } else if (isFirefoxFullBrowser) {
+        if (!firefoxProcess) return;
+        data = captureScreenChrome();
+      } else if (page) {
+        const buf = await page.screenshot({ type: 'jpeg', quality: 80 });
+        data = toBase64(buf);
+        format = 'jpeg';
+      } else {
+        return;
+      }
     } else {
       return;
     }
@@ -465,8 +481,8 @@ async function sendScreenshot() {
       type: 'screenshot',
       analysis_id: SESSION_ID,
       data: data || '',
-      width: VIEWPORT.width,
-      height: VIEWPORT.height,
+      width: currentViewport.width,
+      height: currentViewport.height,
       format,
     });
   } catch (err) {
@@ -477,52 +493,342 @@ async function sendScreenshot() {
   }
 }
 
-async function launchChrome() {
+/** Build run options and currentViewport from a navigate command (from server or viewer). */
+function navOptionsFromCmd(cmd) {
+  const vw = cmd.viewport_width ?? DEFAULT_VIEWPORT.width;
+  const vh = cmd.viewport_height ?? DEFAULT_VIEWPORT.height;
+  currentViewport = {
+    width: vw,
+    height: vh,
+    deviceScaleFactor: cmd.device_scale_factor ?? 1,
+    isMobile: cmd.is_mobile ?? false,
+  };
+  return {
+    proxy: cmd.proxy ?? null,
+    user_agent: cmd.user_agent ?? null,
+    viewport_width: vw,
+    viewport_height: vh,
+    device_scale_factor: currentViewport.deviceScaleFactor,
+    is_mobile: currentViewport.isMobile,
+    timezone_id: cmd.timezone_id ?? null,
+    locale: cmd.locale ?? null,
+    latitude: cmd.latitude,
+    longitude: cmd.longitude,
+    accuracy: cmd.accuracy,
+    network_throttling: cmd.network_throttling ?? null,
+  };
+}
+
+/** Apply run options from a navigate cmd to an existing Chrome page (subsequent navigates). Firefox context is fixed at launch. */
+async function applyRunOptionsToPage(cmd) {
+  if (!page) return;
+  try {
+    await page.setViewport(currentViewport);
+    if (cmd.user_agent) await page.setUserAgent(cmd.user_agent);
+    if (cmd.latitude != null && cmd.longitude != null) {
+      await page.setGeolocation({
+        latitude: cmd.latitude,
+        longitude: cmd.longitude,
+        accuracy: cmd.accuracy ?? 10,
+      });
+    }
+    if (cmd.timezone_id) await page.emulateTimezone(cmd.timezone_id);
+    if (cmd.locale) await page.setExtraHTTPHeaders({ 'Accept-Language': (cmd.locale.replace('_', '-')) + ',en;q=0.9' });
+    const profile = (cmd.network_throttling || '').toLowerCase();
+    if (profile === 'slow3g' || profile === 'fast3g') {
+      const conditions = {
+        slow3g: { download: (400 * 1024) / 8, upload: (400 * 1024) / 8, latency: 2000 },
+        fast3g: { download: (1.6 * 1024 * 1024) / 8, upload: (750 * 1024) / 8, latency: 562.5 },
+      };
+      const c = conditions[profile];
+      if (c) await page.emulateNetworkConditions({ offline: false, ...c });
+    }
+  } catch (e) {
+    debugLog('applyRunOptionsToPage failed: %s', e.message);
+  }
+}
+
+async function launchChrome(opts = {}) {
   const exe = process.env.PUPPETEER_EXECUTABLE_PATH || 'default Chromium';
   const display = process.env.DISPLAY || ':99';
   console.error('[baliverne-runtime] launching Chrome (full browser on X11) DISPLAY=%s executable=%s', display, exe);
+  if (opts.proxy || opts.user_agent || opts.viewport_width || opts.timezone_id || opts.locale || (opts.latitude != null && opts.longitude != null) || opts.network_throttling) {
+    console.error(
+      '[baliverne-runtime] Chrome run_options apply: viewport %sx%s proxy=%s user_agent=%s timezone=%s locale=%s geo=%s network=%s',
+      currentViewport.width, currentViewport.height,
+      opts.proxy ? '(set)' : 'no',
+      opts.user_agent ? '(set)' : 'no',
+      opts.timezone_id || 'no',
+      opts.locale || 'no',
+      (opts.latitude != null && opts.longitude != null) ? 'yes' : 'no',
+      opts.network_throttling || 'no'
+    );
+  }
   const puppeteer = require('puppeteer');
+  const args = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--window-size=' + currentViewport.width + ',' + currentViewport.height,
+    '--start-maximized',
+    '--disable-blink-features=AutomationControlled',
+    '--ignore-certificate-errors',
+    '--ignore-certificate-errors-spki-list',
+    '--allow-running-insecure-content',
+  ];
+  if (opts.proxy) {
+    args.push('--proxy-server=' + opts.proxy);
+    debugLog('Chrome proxy: %s', opts.proxy);
+  }
   debugLog('puppeteer.launch headless=false ...');
   browser = await puppeteer.launch({
     headless: false,
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--window-size=' + VIEWPORT.width + ',' + VIEWPORT.height,
-      '--start-maximized',
-      '--disable-blink-features=AutomationControlled',
-    ],
+    ignoreHTTPSErrors: true,
+    args,
   });
   const pages = await browser.pages();
   page = pages[0] || (await browser.newPage());
-  debugLog('Chrome page ready, setting viewport %sx%s', VIEWPORT.width, VIEWPORT.height);
-  await page.setViewport(VIEWPORT);
+  debugLog('Chrome page ready, setting viewport %sx%s', currentViewport.width, currentViewport.height);
+  await page.setViewport(currentViewport);
+  if (opts.user_agent) {
+    await page.setUserAgent(opts.user_agent);
+    debugLog('Chrome user-agent set');
+  }
+  if (opts.latitude != null && opts.longitude != null) {
+    try {
+      await page.setGeolocation({
+        latitude: opts.latitude,
+        longitude: opts.longitude,
+        accuracy: opts.accuracy ?? 10,
+      });
+      debugLog('Chrome geolocation set');
+    } catch (e) {
+      debugLog('Chrome setGeolocation failed: %s', e.message);
+    }
+  }
+  if (opts.timezone_id) {
+    try {
+      await page.emulateTimezone(opts.timezone_id);
+      debugLog('Chrome timezone set: %s', opts.timezone_id);
+    } catch (e) {
+      debugLog('Chrome emulateTimezone failed: %s', e.message);
+    }
+  }
+  if (opts.locale) {
+    try {
+      await page.setExtraHTTPHeaders({ 'Accept-Language': (opts.locale.replace('_', '-')) + ',en;q=0.9' });
+      debugLog('Chrome locale header set');
+    } catch (e) {
+      debugLog('Chrome setExtraHTTPHeaders failed: %s', e.message);
+    }
+  }
+  const profile = (opts.network_throttling || '').toLowerCase();
+  if (profile === 'slow3g' || profile === 'fast3g') {
+    const conditions = {
+      slow3g: { download: (400 * 1024) / 8, upload: (400 * 1024) / 8, latency: 2000 },
+      fast3g: { download: (1.6 * 1024 * 1024) / 8, upload: (750 * 1024) / 8, latency: 562.5 },
+    };
+    const c = conditions[profile];
+    if (c) {
+      try {
+        await page.emulateNetworkConditions({ offline: false, ...c });
+        debugLog('Chrome network throttling: %s', profile);
+      } catch (e) {
+        debugLog('Chrome emulateNetworkConditions failed: %s', e.message);
+      }
+    }
+  }
   console.error('[baliverne-runtime] Chrome launched on DISPLAY, capture via GStreamer');
 }
 
-/** Launch real Firefox on X11 (Neko-style). Uses GStreamer + xdotool like Chrome. */
-async function launchFirefox() {
+/** Launch real Firefox on X11 via Playwright for instrumentation (network, console, navigate). GStreamer + xdotool for capture/input.
+ * Uses Playwright's bundled Firefox (install with: npx playwright install firefox in Dockerfile). System Firefox is not
+ * protocol-compatible with Playwright, so executablePath is only used when set explicitly (e.g. FIREFOX_EXECUTABLE_PATH). */
+async function launchFirefox(opts = {}) {
   const display = process.env.DISPLAY || ':99';
-  const args = [
-    '--no-remote',
-    '-P', 'default',
-    '--display=' + display,
-    '-width', String(VIEWPORT.width),
-    '-height', String(VIEWPORT.height),
-  ];
-  console.error('[baliverne-runtime] launching Firefox (full browser on X11) DISPLAY=%s args=%s', display, args.join(' '));
-  firefoxProcess = spawn('/usr/bin/firefox', args, {
-    env: { ...process.env, DISPLAY: display, HOME: process.env.HOME || '/app' },
-    stdio: ['ignore', 'pipe', 'pipe'],
+  const { firefox } = require('playwright');
+  const firefoxExe = process.env.FIREFOX_EXECUTABLE_PATH || undefined;
+  console.error('[baliverne-runtime] launching Firefox via Playwright (full browser on X11) DISPLAY=%s', display);
+  if (opts.proxy || opts.user_agent || opts.timezone_id || opts.locale || (opts.latitude != null && opts.longitude != null)) {
+    console.error(
+      '[baliverne-runtime] Firefox run_options apply: viewport %sx%s proxy=%s user_agent=%s timezone=%s locale=%s geo=%s',
+      currentViewport.width, currentViewport.height,
+      opts.proxy ? '(set)' : 'no',
+      opts.user_agent ? '(set)' : 'no',
+      opts.timezone_id || 'no',
+      opts.locale || 'no',
+      (opts.latitude != null && opts.longitude != null) ? 'yes' : 'no'
+    );
+  }
+  browser = await firefox.launch({
+    headless: false,
+    ...(firefoxExe ? { executablePath: firefoxExe } : {}),
+    env: { ...process.env, DISPLAY: display },
+    args: firefoxExe
+      ? ['--no-remote', '-width', String(currentViewport.width), '-height', String(currentViewport.height)]
+      : [],
   });
-  firefoxProcess.on('error', (err) => console.error('[baliverne-runtime] Firefox process error:', err.message));
-  firefoxProcess.on('exit', (code, signal) => {
-    if (code != null && code !== 0) console.error('[baliverne-runtime] Firefox exited with code=%s', code);
-    if (signal) console.error('[baliverne-runtime] Firefox killed signal=%s', signal);
+  const contextOpts = {
+    viewport: currentViewport,
+    ignoreHTTPSErrors: true,
+  };
+  if (opts.user_agent) contextOpts.userAgent = opts.user_agent;
+  if (opts.proxy) contextOpts.proxy = { server: opts.proxy };
+  if (opts.timezone_id) contextOpts.timezoneId = opts.timezone_id;
+  if (opts.locale) contextOpts.locale = opts.locale.replace('_', '-');
+  if (opts.latitude != null && opts.longitude != null) {
+    contextOpts.geolocation = {
+      latitude: opts.latitude,
+      longitude: opts.longitude,
+      accuracy: opts.accuracy ?? 10,
+    };
+  }
+  const context = await browser.newContext(contextOpts);
+  page = await context.newPage();
+  debugLog('Firefox page ready, viewport %sx%s', currentViewport.width, currentViewport.height);
+  console.error('[baliverne-runtime] Firefox launched on DISPLAY (Playwright-instrumented), capture via GStreamer');
+}
+
+function setupPageListeners() {
+  if (!page) return;
+  const requestHandler = (request) => {
+    const reqUrl = (typeof request.url === 'function' ? request.url() : request.url) || '';
+    if (mainDocumentHost == null && (typeof request.isNavigationRequest === 'function' && request.isNavigationRequest())) {
+      try { mainDocumentHost = new URL(reqUrl).hostname; } catch {}
+    }
+    let isThirdParty = false;
+    try { isThirdParty = mainDocumentHost != null && new URL(reqUrl).hostname !== mainDocumentHost; } catch {}
+    let reqHeaders = {};
+    try { reqHeaders = (typeof request.headers === 'function' ? request.headers() : null) || {}; } catch {}
+    let postData = null;
+    try { postData = (typeof request.postData === 'function' ? request.postData() : null) || null; } catch {}
+    let initiator = null;
+    try {
+      const init = (typeof request.initiator === 'function' ? request.initiator() : null) || request._initiator;
+      if (init) initiator = { type: init.type || null, url: init.url || null, lineNumber: init.lineNumber ?? null };
+    } catch {}
+    networkRequests.push({
+      url: reqUrl,
+      method: typeof request.method === 'function' ? request.method() : 'GET',
+      resource_type: (typeof request.resourceType === 'function' ? request.resourceType() : null) || 'other',
+      is_navigation: typeof request.isNavigationRequest === 'function' ? request.isNavigationRequest() : false,
+      status: null,
+      status_text: null,
+      content_type: null,
+      size: null,
+      response_size: null,
+      remote_ip: null,
+      remote_port: null,
+      is_third_party: isThirdParty,
+      from_cache: false,
+      from_service_worker: false,
+      timestamp: Date.now(),
+      request_headers: Object.keys(reqHeaders).length ? reqHeaders : null,
+      request_body: postData,
+      response_headers: null,
+      timing: null,
+      security_details: null,
+      initiator,
+      failure: null,
+    });
+  };
+  const responseHandler = async (response) => {
+    const reqUrl = (typeof response.url === 'function' ? response.url() : response.url) || '';
+    const status = (typeof response.status === 'function' ? response.status() : response.status) || 0;
+    const request = response.request();
+    const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
+    if (!existing) return;
+    existing.status = status;
+    try { existing.status_text = (typeof response.statusText === 'function' ? response.statusText() : null) || null; } catch { existing.status_text = null; }
+    let respHeaders = {};
+    try { respHeaders = (typeof response.headers === 'function' ? response.headers() : null) || {}; } catch {}
+    existing.content_type = respHeaders['content-type'] || null;
+    existing.response_headers = Object.keys(respHeaders).length ? respHeaders : null;
+    const contentLength = parseInt(respHeaders['content-length'], 10);
+    if (!isNaN(contentLength)) existing.response_size = contentLength;
+    try {
+      const remote = typeof response.remoteAddress === 'function' ? response.remoteAddress() : null;
+      existing.remote_ip = remote?.ip || null;
+      existing.remote_port = remote?.port || null;
+    } catch {}
+    try { existing.from_cache = (typeof response.fromCache === 'function' ? response.fromCache() : false) || false; } catch {}
+    try { existing.from_service_worker = (typeof response.fromServiceWorker === 'function' ? response.fromServiceWorker() : false) || false; } catch {}
+    try {
+      const timing = typeof response.timing === 'function' ? response.timing() : null;
+      if (timing && typeof timing === 'object') {
+        existing.timing = {
+          requestTime: timing.requestTime ?? null,
+          dnsStart: timing.dnsStart ?? null,
+          dnsEnd: timing.dnsEnd ?? null,
+          connectStart: timing.connectStart ?? null,
+          connectEnd: timing.connectEnd ?? null,
+          sslStart: timing.sslStart ?? null,
+          sslEnd: timing.sslEnd ?? null,
+          sendStart: timing.sendStart ?? null,
+          sendEnd: timing.sendEnd ?? null,
+          receiveHeadersStart: timing.receiveHeadersStart ?? null,
+          receiveHeadersEnd: timing.receiveHeadersEnd ?? null,
+        };
+      }
+    } catch {}
+    try {
+      const sec = typeof response.securityDetails === 'function' ? response.securityDetails() : null;
+      if (sec && typeof sec === 'object') {
+        const proto = typeof sec.protocol === 'function' ? sec.protocol() : sec.protocol;
+        const issuer = typeof sec.issuer === 'function' ? sec.issuer() : sec.issuer;
+        const subjectName = typeof sec.subjectName === 'function' ? sec.subjectName() : sec.subjectName;
+        const validFrom = typeof sec.validFrom === 'function' ? sec.validFrom() : sec.validFrom;
+        const validTo = typeof sec.validTo === 'function' ? sec.validTo() : sec.validTo;
+        existing.security_details = { protocol: proto ?? null, issuer: issuer ?? null, subjectName: subjectName ?? null, validFrom: validFrom ?? null, validTo: validTo ?? null };
+      }
+    } catch {}
+    send({ type: 'network_request_captured', analysis_id: SESSION_ID, request: { ...existing } });
+  };
+  const requestFailedHandler = (request) => {
+    const reqUrl = typeof request.url === 'function' ? request.url() : request.url;
+    const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
+    if (existing) {
+      try { existing.failure = (typeof request.failure === 'function' ? request.failure() : null)?.errorText || 'unknown'; } catch { existing.failure = 'unknown'; }
+      existing.status_text = 'Failed';
+      send({ type: 'network_request_captured', analysis_id: SESSION_ID, request: { ...existing } });
+    }
+  };
+  page.on('request', requestHandler);
+  page.on('response', responseHandler);
+  page.on('requestfailed', requestFailedHandler);
+  page.on('console', (msg) => {
+    const text = typeof msg.text === 'function' ? msg.text() : String(msg.text);
+    const level = (msg.type && typeof msg.type === 'function' ? msg.type() : 'log') || 'log';
+    send({ type: 'console_log_captured', analysis_id: SESSION_ID, log: { level, text, timestamp: Date.now() } });
   });
-  console.error('[baliverne-runtime] Firefox launched on DISPLAY, capture via GStreamer');
+}
+
+async function onBrowserReady() {
+  if (browserReadySent) return;
+  browserReadySent = true;
+  if ((isChromeFullBrowser || isFirefoxFullBrowser) && (!NEKO_INPUT_SOCKET || nekoConnectFailed) && XTEST_INJECTOR_PATH && !xtestInjectorFailed) {
+    ensureXtestInjector();
+  }
+  const inputBackend = (nekoSocket && nekoSocket.writable) ? 'neko' : (xtestInjectorProcess && xtestInjectorProcess.stdin && xtestInjectorProcess.stdin.writable) ? 'xtest' : (!NEKO_INPUT_SOCKET || nekoConnectFailed) && (!XTEST_INJECTOR_PATH || xtestInjectorFailed) ? 'xdotool' : 'pending';
+  const videoDriver = process.env.BALIVERNE_VIDEO_DRIVER || 'dummy';
+  console.error('[baliverne-runtime] sending agent_ready input_backend=%s video_driver=%s', inputBackend, videoDriver);
+  send({ type: 'agent_ready', session_id: SESSION_ID, input_backend: inputBackend, video_driver: videoDriver });
+  if (isChromeFullBrowser || isFirefoxFullBrowser) {
+    debugLog('waiting 2s for browser window on X');
+    await new Promise(r => setTimeout(r, 2000));
+    if (USE_RTP) {
+      debugLog('starting RTP stream to %s:%s', RTP_HOST, RTP_PORT);
+      startRtpStream();
+    }
+  }
+  const intervalMs = parseInt(process.env.BALIVERNE_SCREENSHOT_INTERVAL_MS || '500', 10) || 500;
+  if (screenshotIntervalId) clearInterval(screenshotIntervalId);
+  await sendScreenshot();
+  screenshotIntervalId = setInterval(() => { sendScreenshot().catch(() => {}); }, intervalMs);
+  if (USE_RTP) {
+    console.error('[baliverne-runtime] WebRTC RTP active — video via RTP; screenshots via page.screenshot() for timeline');
+  }
 }
 
 function waitForConnect(socket) {
@@ -563,179 +869,9 @@ async function run() {
     ws.on('open', async () => {
     console.error('[baliverne-runtime] WebSocket open, connected to %s', WS_URL);
     console.error('[baliverne-runtime] RTP config: BALIVERNE_RTP_HOST=%s BALIVERNE_RTP_PORT=%s USE_RTP=%s', RTP_HOST ?? '(unset)', RTP_PORT ?? '(unset)', USE_RTP);
-    debugLog('sending browser_starting');
+    debugLog('sending browser_starting (browser will launch on first navigate with run_options)');
     if (NEKO_INPUT_SOCKET) setTimeout(() => nekoEnsureConnected(), 500);
     send({ type: 'browser_starting', session_id: SESSION_ID });
-    try {
-      debugLog('launching browser: %s', BROWSER);
-      if (BROWSER === 'firefox') {
-        await launchFirefox();
-      } else {
-        await launchChrome();
-      }
-      debugLog('browser launched, page=%s', !!page);
-      if (page) {
-        const networkRequests = [];
-        let mainDocumentHost = null;
-
-        const requestHandler = (request) => {
-          const reqUrl = request.url();
-          if (mainDocumentHost == null && (typeof request.isNavigationRequest === 'function' && request.isNavigationRequest())) {
-            try { mainDocumentHost = new URL(reqUrl).hostname; } catch {}
-          }
-          let isThirdParty = false;
-          try { isThirdParty = mainDocumentHost != null && new URL(reqUrl).hostname !== mainDocumentHost; } catch {}
-
-          let reqHeaders = {};
-          try { reqHeaders = (typeof request.headers === 'function' ? request.headers() : null) || {}; } catch {}
-          let postData = null;
-          try { postData = (typeof request.postData === 'function' ? request.postData() : null) || null; } catch {}
-
-          let initiator = null;
-          try {
-            const init = (typeof request.initiator === 'function' ? request.initiator() : null) || request._initiator;
-            if (init) initiator = { type: init.type || null, url: init.url || null, lineNumber: init.lineNumber ?? null };
-          } catch {}
-
-          networkRequests.push({
-            url: reqUrl,
-            method: typeof request.method === 'function' ? request.method() : 'GET',
-            resource_type: (typeof request.resourceType === 'function' ? request.resourceType() : null) || 'other',
-            is_navigation: typeof request.isNavigationRequest === 'function' ? request.isNavigationRequest() : false,
-            status: null,
-            status_text: null,
-            content_type: null,
-            size: null,
-            response_size: null,
-            remote_ip: null,
-            remote_port: null,
-            is_third_party: isThirdParty,
-            from_cache: false,
-            from_service_worker: false,
-            timestamp: Date.now(),
-            request_headers: Object.keys(reqHeaders).length ? reqHeaders : null,
-            request_body: postData,
-            response_headers: null,
-            timing: null,
-            security_details: null,
-            initiator,
-            failure: null,
-          });
-        };
-
-        const responseHandler = async (response) => {
-          const reqUrl = response.url();
-          const status = response.status();
-          const request = response.request();
-          const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
-          if (!existing) return;
-
-          existing.status = status;
-          try { existing.status_text = (typeof response.statusText === 'function' ? response.statusText() : null) || null; } catch { existing.status_text = null; }
-
-          let respHeaders = {};
-          try { respHeaders = (typeof response.headers === 'function' ? response.headers() : null) || {}; } catch {}
-          existing.content_type = respHeaders['content-type'] || null;
-          existing.response_headers = Object.keys(respHeaders).length ? respHeaders : null;
-
-          const contentLength = parseInt(respHeaders['content-length'], 10);
-          if (!isNaN(contentLength)) existing.response_size = contentLength;
-
-          try {
-            const remote = typeof response.remoteAddress === 'function' ? response.remoteAddress() : null;
-            existing.remote_ip = remote?.ip || null;
-            existing.remote_port = remote?.port || null;
-          } catch {}
-          try { existing.from_cache = (typeof response.fromCache === 'function' ? response.fromCache() : false) || false; } catch {}
-          try { existing.from_service_worker = (typeof response.fromServiceWorker === 'function' ? response.fromServiceWorker() : false) || false; } catch {}
-
-          try {
-            const timing = typeof response.timing === 'function' ? response.timing() : null;
-            if (timing && typeof timing === 'object') {
-              existing.timing = {
-                requestTime: timing.requestTime ?? null,
-                dnsStart: timing.dnsStart ?? null,
-                dnsEnd: timing.dnsEnd ?? null,
-                connectStart: timing.connectStart ?? null,
-                connectEnd: timing.connectEnd ?? null,
-                sslStart: timing.sslStart ?? null,
-                sslEnd: timing.sslEnd ?? null,
-                sendStart: timing.sendStart ?? null,
-                sendEnd: timing.sendEnd ?? null,
-                receiveHeadersStart: timing.receiveHeadersStart ?? null,
-                receiveHeadersEnd: timing.receiveHeadersEnd ?? null,
-              };
-            }
-          } catch {}
-
-          try {
-            const sec = typeof response.securityDetails === 'function' ? response.securityDetails() : null;
-            if (sec && typeof sec === 'object') {
-              const proto = typeof sec.protocol === 'function' ? sec.protocol() : sec.protocol;
-              const issuer = typeof sec.issuer === 'function' ? sec.issuer() : sec.issuer;
-              const subjectName = typeof sec.subjectName === 'function' ? sec.subjectName() : sec.subjectName;
-              const validFrom = typeof sec.validFrom === 'function' ? sec.validFrom() : sec.validFrom;
-              const validTo = typeof sec.validTo === 'function' ? sec.validTo() : sec.validTo;
-              existing.security_details = { protocol: proto ?? null, issuer: issuer ?? null, subjectName: subjectName ?? null, validFrom: validFrom ?? null, validTo: validTo ?? null };
-            }
-          } catch {}
-
-          send({ type: 'network_request_captured', analysis_id: SESSION_ID, request: { ...existing } });
-        };
-
-        const requestFailedHandler = (request) => {
-          const reqUrl = typeof request.url === 'function' ? request.url() : request.url;
-          const existing = networkRequests.find((r) => r.url === reqUrl && r.status === null);
-          if (existing) {
-            try { existing.failure = (typeof request.failure === 'function' ? request.failure() : null)?.errorText || 'unknown'; } catch { existing.failure = 'unknown'; }
-            existing.status_text = 'Failed';
-            send({ type: 'network_request_captured', analysis_id: SESSION_ID, request: { ...existing } });
-          }
-        };
-
-        page.on('request', requestHandler);
-        page.on('response', responseHandler);
-        page.on('requestfailed', requestFailedHandler);
-        page.on('console', (msg) => {
-          const text = typeof msg.text === 'function' ? msg.text() : String(msg.text);
-          const level = (msg.type && typeof msg.type === 'function' ? msg.type() : 'log') || 'log';
-          send({
-            type: 'console_log_captured',
-            analysis_id: SESSION_ID,
-            log: { level, text, timestamp: Date.now() },
-          });
-        });
-      }
-      if ((isChromeFullBrowser || isFirefoxFullBrowser) && (!NEKO_INPUT_SOCKET || nekoConnectFailed) && XTEST_INJECTOR_PATH && !xtestInjectorFailed) {
-        ensureXtestInjector();
-      }
-      const inputBackend = (nekoSocket && nekoSocket.writable) ? 'neko' : (xtestInjectorProcess && xtestInjectorProcess.stdin && xtestInjectorProcess.stdin.writable) ? 'xtest' : (!NEKO_INPUT_SOCKET || nekoConnectFailed) && (!XTEST_INJECTOR_PATH || xtestInjectorFailed) ? 'xdotool' : 'pending';
-      const videoDriver = process.env.BALIVERNE_VIDEO_DRIVER || 'dummy';
-      console.error('[baliverne-runtime] sending agent_ready input_backend=%s video_driver=%s', inputBackend, videoDriver);
-      send({ type: 'agent_ready', session_id: SESSION_ID, input_backend: inputBackend, video_driver: videoDriver });
-      if (isChromeFullBrowser || isFirefoxFullBrowser) {
-        debugLog('waiting 2s for browser window on X');
-        await new Promise(r => setTimeout(r, 2000)); // let browser window appear on X
-        if (USE_RTP) {
-          debugLog('starting RTP stream to %s:%s', RTP_HOST, RTP_PORT);
-          startRtpStream();
-        }
-      }
-      // When WebRTC/RTP is used, do not send screenshots over WebSocket (video is via RTP only).
-      if (!USE_RTP) {
-        await sendScreenshot();
-        const intervalMs = parseInt(process.env.BALIVERNE_SCREENSHOT_INTERVAL_MS || '500', 10) || 500;
-        if (screenshotIntervalId) clearInterval(screenshotIntervalId);
-        screenshotIntervalId = setInterval(() => { sendScreenshot().catch(() => {}); }, intervalMs);
-      } else {
-        if (screenshotIntervalId) clearInterval(screenshotIntervalId);
-        screenshotIntervalId = null;
-        console.error('[baliverne-runtime] WebRTC RTP active — screencast disabled (video via RTP only)');
-      }
-    } catch (err) {
-      console.error('[baliverne-runtime] browser launch failed:', err.message || err);
-      send({ type: 'error', analysis_id: SESSION_ID, message: err.message || String(err) });
-    }
   });
   ws.on('message', async (data) => {
     const isBinary = Buffer.isBuffer(data) || data instanceof ArrayBuffer;
@@ -754,37 +890,75 @@ async function run() {
       debugLog('command type=%s (message size=%s)', cmd.type, typeof data?.length === 'number' ? data.length : (data?.byteLength ?? '?'));
     }
     if (cmd.type === 'set_screenshot_interval') {
-      if (USE_RTP) return; // no screencast when WebRTC RTP is active
       const ms = typeof cmd.ms === 'number' && cmd.ms > 0 ? cmd.ms : parseInt(process.env.BALIVERNE_SCREENSHOT_INTERVAL_MS || '500', 10) || 500;
       if (screenshotIntervalId) clearInterval(screenshotIntervalId);
       screenshotIntervalId = setInterval(() => { sendScreenshot().catch(() => {}); }, ms);
       console.error('[baliverne-runtime] screenshot interval set to %d ms (%s)', ms, ms >= 5000 ? 'throttled (viewer on WebRTC)' : 'normal');
       return;
     }
-    if (!(isChromeFullBrowser || isFirefoxFullBrowser) && !page) {
+    if (cmd.type !== 'navigate' && !(isChromeFullBrowser || isFirefoxFullBrowser) && !page) {
       debugLog('command %s ignored: browser not ready (page=%s)', cmd.type, !!page);
       return;
     }
     if (['click', 'mousemove', 'scroll', 'key_press', 'type_text', 'navigate'].includes(cmd.type) && cmd.type !== 'mousemove') {
-      console.error('[baliverne-runtime] command received: %s', cmd.type, cmd.type === 'click' ? { x: cmd.x, y: cmd.y } : cmd.type === 'navigate' ? { url: cmd.url } : cmd.type === 'key_press' ? { key: cmd.key } : '');
+      const navSummary = cmd.type === 'navigate'
+        ? { url: cmd.url, viewport: (cmd.viewport_width && cmd.viewport_height) ? `${cmd.viewport_width}x${cmd.viewport_height}` : null, proxy: !!cmd.proxy, user_agent: !!cmd.user_agent, geo: !!(cmd.latitude != null && cmd.longitude != null), network: cmd.network_throttling || null }
+        : null;
+      console.error('[baliverne-runtime] command received: %s', cmd.type, cmd.type === 'navigate' ? navSummary : cmd.type === 'click' ? { x: cmd.x, y: cmd.y } : cmd.type === 'key_press' ? { key: cmd.key } : '');
     }
     try {
       switch (cmd.type) {
         case 'navigate': {
           const url = cmd.url || 'about:blank';
           console.error('[baliverne-runtime] navigate to %s', url);
-          if (isFirefoxFullBrowser) {
-            focusBrowser();
+          if (!browser) {
+            const opts = navOptionsFromCmd(cmd);
+            console.error(
+              '[baliverne-runtime] run_options received: viewport=%sx%s proxy=%s user_agent=%s timezone=%s locale=%s geo=%s network_throttling=%s',
+              currentViewport.width,
+              currentViewport.height,
+              opts.proxy ? opts.proxy : '(none)',
+              opts.user_agent ? '(set)' : '(none)',
+              opts.timezone_id || '(none)',
+              opts.locale || '(none)',
+              (opts.latitude != null && opts.longitude != null) ? `${opts.latitude},${opts.longitude}` : '(none)',
+              opts.network_throttling || '(none)'
+            );
             try {
-              execSync('xdotool key --clearmodifiers ctrl+l', { timeout: 1000, stdio: 'pipe' });
-              execSync('xdotool type --clearmodifiers ' + shellEscape(url), { timeout: 3000, stdio: 'pipe' });
-              execSync('xdotool key Return', { timeout: 1000, stdio: 'pipe' });
-            } catch (e) {
-              console.error('[baliverne-runtime] Firefox navigate (xdotool) failed:', e.message);
+              if (BROWSER === 'firefox') {
+                await launchFirefox(opts);
+              } else {
+                await launchChrome(opts);
+              }
+              setupPageListeners();
+              await onBrowserReady();
+            } catch (err) {
+              console.error('[baliverne-runtime] browser launch failed:', err.message || err);
+              send({ type: 'error', analysis_id: SESSION_ID, message: err.message || String(err) });
+              break;
             }
-            send({ type: 'navigation_complete', analysis_id: SESSION_ID, url });
-          } else if (page) {
-            const opts = { waitUntil: 'networkidle2', timeout: 30000 };
+          } else {
+            mainDocumentHost = null;
+            navOptionsFromCmd(cmd);
+            const opts = { proxy: cmd.proxy, user_agent: cmd.user_agent, viewport_width: cmd.viewport_width, viewport_height: cmd.viewport_height, timezone_id: cmd.timezone_id, locale: cmd.locale, latitude: cmd.latitude, longitude: cmd.longitude, network_throttling: cmd.network_throttling };
+            const hasOpts = opts.proxy || opts.user_agent || opts.viewport_width || opts.viewport_height || opts.timezone_id || opts.locale || (opts.latitude != null && opts.longitude != null) || opts.network_throttling;
+            if (hasOpts) {
+              console.error(
+                '[baliverne-runtime] run_options (browser already running): viewport=%sx%s proxy=%s user_agent=%s timezone=%s locale=%s geo=%s network=%s',
+                currentViewport.width, currentViewport.height,
+                opts.proxy ? '(set)' : '(none)', opts.user_agent ? '(set)' : '(none)', opts.timezone_id || '(none)', opts.locale || '(none)',
+                (opts.latitude != null && opts.longitude != null) ? 'yes' : '(none)', opts.network_throttling || '(none)'
+              );
+            }
+            if (isChromeFullBrowser && page) {
+              await applyRunOptionsToPage(cmd);
+              if (hasOpts) console.error('[baliverne-runtime] applied run_options to existing Chrome page');
+            }
+          }
+          if (page) {
+            const opts = isFirefoxFullBrowser
+              ? { waitUntil: 'networkidle', timeout: 30000 }
+              : { waitUntil: 'networkidle2', timeout: 30000 };
             await page.goto(url, opts);
             const finalUrl = typeof page.url === 'function' ? page.url() : (await page.evaluate(() => window.location.href));
             send({ type: 'navigation_complete', analysis_id: SESSION_ID, url: finalUrl });

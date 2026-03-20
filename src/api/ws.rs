@@ -193,6 +193,30 @@ async fn send_navigate_to_baliverne_runtime(state: &AppState, analysis_id: &str)
     }
 }
 
+/// True if the analysis is unknown or already complete/error (agent should not keep sending events for it).
+fn is_stale_analysis(state: &AppState, analysis_id: &str) -> bool {
+    state
+        .analyses
+        .get(analysis_id)
+        .map(|a| {
+            a.status == AnalysisStatus::Complete || a.status == AnalysisStatus::Error
+        })
+        .unwrap_or(true)
+}
+
+/// If the analysis is stale, send stop_analysis to the agent once so it cleans up the session. Call when discarding events for stale analyses.
+fn try_send_stale_stop(state: &AppState, analysis_id: &str) {
+    if !is_stale_analysis(state, analysis_id) {
+        return;
+    }
+    if state.stale_analysis_stop_sent.insert(analysis_id.to_string()) {
+        let _ = state.agent_cmd_tx.send(AgentCommand::StopAnalysis {
+            analysis_id: analysis_id.to_string(),
+        });
+        tracing::info!(%analysis_id, "sent stop_analysis to agent for stale/orphan session");
+    }
+}
+
 /// Update server state from an agent event and forward the event to any viewers for that analysis.
 pub(crate) async fn handle_agent_event(state: &AppState, event: AgentEvent) {
     tracing::debug!(event_type = %event.type_name(), "handle_agent_event: entry");
@@ -200,21 +224,8 @@ pub(crate) async fn handle_agent_event(state: &AppState, event: AgentEvent) {
         AgentEvent::Screenshot {
             analysis_id, data, ..
         } => {
-            let is_baliverne = state
-                .analysis_to_baliverne
-                .as_ref()
-                .map(|m| m.contains_key(analysis_id))
-                .unwrap_or(false);
-            if is_baliverne {
-                // Baliverne uses WebRTC/RTP for video; do not store or forward screenshot over WebSocket.
-                if let Some(mut analysis) = state.analyses.get_mut(analysis_id) {
-                    if analysis.status == AnalysisStatus::Pending {
-                        analysis.status = AnalysisStatus::Running;
-                        if let Some(a) = state.analyses.get(analysis_id) {
-                            state.persist_analysis(a.clone());
-                        }
-                    }
-                }
+            if is_stale_analysis(state, analysis_id) {
+                try_send_stale_stop(state, analysis_id);
                 return;
             }
             tracing::debug!(
@@ -263,6 +274,10 @@ pub(crate) async fn handle_agent_event(state: &AppState, event: AgentEvent) {
             analysis_id,
             request,
         } => {
+            if is_stale_analysis(state, analysis_id) {
+                try_send_stale_stop(state, analysis_id);
+                return;
+            }
             tracing::debug!(
                 "Network request for {}: {} {} -> {:?}",
                 analysis_id,
@@ -279,6 +294,10 @@ pub(crate) async fn handle_agent_event(state: &AppState, event: AgentEvent) {
         }
 
         AgentEvent::ConsoleLogCaptured { analysis_id, log } => {
+            if is_stale_analysis(state, analysis_id) {
+                try_send_stale_stop(state, analysis_id);
+                return;
+            }
             tracing::debug!(
                 "Console [{}] for {}: {}",
                 log.level,
@@ -699,9 +718,37 @@ pub(crate) async fn send_viewer_command_to_agent(
 fn adapt_cmd_to_baliverne(cmd: &AgentCommand) -> Vec<u8> {
     tracing::trace!(cmd_type = %cmd.type_name(), "adapt_cmd_to_baliverne: entry");
     let value = match cmd {
-        AgentCommand::Navigate { url, proxy, user_agent, .. } => {
-            serde_json::json!({ "type": "navigate", "url": url, "proxy": proxy, "user_agent": user_agent })
-        }
+        AgentCommand::Navigate {
+            url,
+            proxy,
+            user_agent,
+            timezone_id,
+            locale,
+            latitude,
+            longitude,
+            accuracy,
+            viewport_width,
+            viewport_height,
+            device_scale_factor,
+            is_mobile,
+            network_throttling,
+            ..
+        } => serde_json::json!({
+            "type": "navigate",
+            "url": url,
+            "proxy": proxy,
+            "user_agent": user_agent,
+            "timezone_id": timezone_id,
+            "locale": locale,
+            "latitude": latitude,
+            "longitude": longitude,
+            "accuracy": accuracy,
+            "viewport_width": viewport_width,
+            "viewport_height": viewport_height,
+            "device_scale_factor": device_scale_factor,
+            "is_mobile": is_mobile,
+            "network_throttling": network_throttling,
+        }),
         AgentCommand::Click { x, y, .. } => serde_json::json!({ "type": "click", "x": x, "y": y }),
         AgentCommand::Scroll { delta_x, delta_y, .. } => {
             serde_json::json!({ "type": "scroll", "dx": delta_x, "dy": delta_y })
@@ -765,29 +812,28 @@ async fn handle_viewer_connection(socket: WebSocket, analysis_id: String, state:
                 let _ = ws_tx.send(Message::Text(json)).await;
             }
         }
-        // For Baliverne, video is via WebRTC/RTP — do not send screenshot. Send stream_mode so UI uses WebRTC viewport.
-        if !is_baliverne {
-            if let Some(ref screenshot) = analysis.screenshot {
-                let ss_msg = serde_json::json!({
-                    "type": "screenshot",
-                    "analysis_id": analysis_id,
-                    "data": screenshot,
-                });
-                if let Ok(json) = serde_json::to_string(&ss_msg) {
-                    let _ = ws_tx.send(Message::Text(json)).await;
-                }
+        // Send last screenshot and timeline count so report/timeline work; Baliverne also gets stream_mode for WebRTC viewport.
+        if let Some(ref screenshot) = analysis.screenshot {
+            let ss_msg = serde_json::json!({
+                "type": "screenshot",
+                "analysis_id": analysis_id,
+                "data": screenshot,
+            });
+            if let Ok(json) = serde_json::to_string(&ss_msg) {
+                let _ = ws_tx.send(Message::Text(json)).await;
             }
-            if !analysis.screenshot_timeline.is_empty() {
-                let ts_msg = serde_json::json!({
-                    "type": "screenshot_timeline_available",
-                    "analysis_id": analysis_id,
-                    "count": analysis.screenshot_timeline.len(),
-                });
-                if let Ok(json) = serde_json::to_string(&ts_msg) {
-                    let _ = ws_tx.send(Message::Text(json)).await;
-                }
+        }
+        if !analysis.screenshot_timeline.is_empty() {
+            let ts_msg = serde_json::json!({
+                "type": "screenshot_timeline_available",
+                "analysis_id": analysis_id,
+                "count": analysis.screenshot_timeline.len(),
+            });
+            if let Ok(json) = serde_json::to_string(&ts_msg) {
+                let _ = ws_tx.send(Message::Text(json)).await;
             }
-        } else {
+        }
+        if is_baliverne {
             let stream_mode_msg = serde_json::json!({
                 "type": "stream_mode",
                 "analysis_id": analysis_id,

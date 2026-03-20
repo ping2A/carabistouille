@@ -237,11 +237,6 @@ header h1 {
   color: var(--danger);
 }
 
-.sidebar-connection-stats {
-  font-variant-numeric: tabular-nums;
-  word-break: break-all;
-}
-
 /* Main layout */
 main {
   display: flex;

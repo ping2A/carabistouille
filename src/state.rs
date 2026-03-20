@@ -3,7 +3,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -48,6 +48,8 @@ pub struct AppState {
     pub analysis_to_baliverne: Option<Arc<DashMap<String, (Uuid, Uuid)>>>,
     /// room_id -> analysis_id for forwarding runtime events to the correct analysis.
     pub baliverne_room_to_analysis: Option<Arc<DashMap<Uuid, String>>>,
+    /// Analysis IDs for which we already sent stop_analysis to the agent (stale/orphan sessions). Avoids spamming stop.
+    pub stale_analysis_stop_sent: Arc<DashSet<String>>,
 }
 
 impl AppState {
@@ -85,6 +87,7 @@ impl AppState {
             baliverne,
             analysis_to_baliverne,
             baliverne_room_to_analysis,
+            stale_analysis_stop_sent: Arc::new(DashSet::new()),
         }
     }
 

@@ -62,7 +62,7 @@ class AdminApp {
     }
   }
 
-  /** Cache DOM references for stats, table, detail panel, agent status. */
+  /** Cache DOM references for stats, table, detail panel, agent status, search. */
   initElements() {
     this.statsEl = document.getElementById('admin-stats');
     this.tbody = document.getElementById('analyses-tbody');
@@ -74,12 +74,81 @@ class AdminApp {
     this.detailCopyLink = document.getElementById('detail-copy-link');
     this.agentStatus = document.getElementById('agent-status');
     this.statusText = this.agentStatus.querySelector('.status-text');
+    this.agentModeEl = document.getElementById('agent-mode');
+    this.searchInput = document.getElementById('admin-search');
   }
 
-  /** Attach click handlers for refresh and detail close. */
+  /** Update header agent mode label from /api/status (agent_backend, run_mode, chrome_mode, baliverne_browser). */
+  updateAgentHeaderInfo() {
+    if (!this.agentModeEl) return;
+    const connected = this.agentStatus?.classList.contains('connected');
+    if (!connected) {
+      this.agentModeEl.style.display = 'none';
+      return;
+    }
+    let modeText = '';
+    if (this.agentBackend === 'baliverne') {
+      const browser = this.baliverneBrowser === 'firefox' ? 'Firefox' : 'Chrome';
+      modeText = `Baliverne + ${browser}`;
+    } else if (this.runMode === 'docker') {
+      if (this.chromeMode === 'lightpanda') modeText = 'Docker + Lightpanda';
+      else if (this.chromeMode === 'real') modeText = 'Docker + real Chrome';
+      else modeText = 'Docker + headless';
+    } else {
+      modeText = 'Local';
+    }
+    this.agentModeEl.textContent = modeText;
+    this.agentModeEl.style.display = 'inline';
+  }
+
+  /** Attach click handlers for refresh, detail close, search, cleanup. */
   initEventListeners() {
     document.getElementById('refresh-btn').addEventListener('click', () => this.refresh());
     document.getElementById('detail-close').addEventListener('click', () => this.closeDetail());
+    if (this.searchInput) {
+      this.searchInput.addEventListener('input', () => {
+        this.renderTable();
+      });
+    }
+    const cleanupBtn = document.getElementById('cleanup-db-btn');
+    if (cleanupBtn) {
+      cleanupBtn.addEventListener('click', () => this.cleanupDatabase());
+    }
+  }
+
+  /** Return analyses filtered by current search query (URL, status, verdict, tags). */
+  getFilteredAnalyses() {
+    const list = Array.isArray(this.analyses) ? this.analyses : [];
+    const q = (this.searchInput?.value || '').trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((a) => {
+      const url = (a.url || '').toLowerCase();
+      const status = (a.status || '').toLowerCase();
+      const verdictLabel = getVerdictLabel(a.tags || []);
+      const verdict = (verdictLabel || '').toLowerCase();
+      const tags = (a.tags || []).map((t) => String(t).toLowerCase()).join(' ');
+      return url.includes(q) || status.includes(q) || verdict.includes(q) || tags.includes(q);
+    });
+  }
+
+  /** DELETE /api/analyses — clear whole database; confirm then refresh. */
+  async cleanupDatabase() {
+    const msg = this.t('admin.cleanupDbConfirm');
+    if (!confirm(msg)) return;
+    try {
+      const res = await fetch('/api/analyses', { method: 'DELETE' });
+      if (!res.ok) {
+        console.error('[admin] Cleanup failed:', res.status, res.statusText);
+        alert(res.status === 404 ? 'No analyses to delete.' : `Cleanup failed: ${res.status}`);
+        return;
+      }
+      this.selectedId = null;
+      this.detailEl.style.display = 'none';
+      await this.refresh();
+    } catch (err) {
+      console.error('[admin] Cleanup failed:', err);
+      alert('Cleanup failed: ' + (err.message || 'Network error'));
+    }
   }
 
   /** Fetch analyses from API and re-render stats and table. */
@@ -170,12 +239,17 @@ class AdminApp {
     `;
   }
 
-  /** Render analyses table rows; show empty state if no analyses. */
+  /** Render analyses table rows; show empty state if no analyses (filtered by search). */
   renderTable() {
-    const list = Array.isArray(this.analyses) ? this.analyses : [];
+    const list = this.getFilteredAnalyses();
     if (!this.tbody) return;
     if (list.length === 0) {
       this.emptyEl.style.display = 'flex';
+      const hasSearch = (this.searchInput?.value || '').trim().length > 0;
+      const total = Array.isArray(this.analyses) ? this.analyses.length : 0;
+      this.emptyEl.textContent = hasSearch && total > 0
+        ? (window.i18n ? window.i18n.t('admin.noMatches') : 'No matches')
+        : (window.i18n ? window.i18n.t('admin.noAnalyses') : 'No analyses yet');
       this.tbody.innerHTML = '';
       return;
     }
@@ -472,6 +546,10 @@ class AdminApp {
       try {
         const res = await fetch('/api/status');
         const data = await res.json();
+        this.agentBackend = data.agent_backend || 'builtin';
+        this.runMode = data.run_mode || 'local';
+        this.chromeMode = data.chrome_mode || null;
+        this.baliverneBrowser = data.baliverne_browser || null;
         if (data.agent_connected) {
           this.agentStatus.classList.remove('disconnected');
           this.agentStatus.classList.add('connected');
@@ -481,10 +559,12 @@ class AdminApp {
           this.agentStatus.classList.add('disconnected');
           this.statusText.textContent = this.t('app.agentDisconnected');
         }
+        this.updateAgentHeaderInfo();
       } catch {
         this.agentStatus.classList.remove('connected');
         this.agentStatus.classList.add('disconnected');
         this.statusText.textContent = this.t('admin.serverUnreachable');
+        this.updateAgentHeaderInfo();
       }
     };
     await check();

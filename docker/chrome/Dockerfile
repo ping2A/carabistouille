@@ -26,9 +26,10 @@ COPY docker/xorg-deps/xf86-input-neko /tmp/xf86-input-neko
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        wget xdotool build-essential autoconf automake libtool pkg-config \
+        ca-certificates wget xdotool build-essential autoconf automake libtool pkg-config \
         xserver-xorg-dev xutils-dev \
         gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly; \
+    update-ca-certificates; \
     wget -O /tmp/google-chrome.deb "${SRC_URL}"; \
     apt-get install -y --no-install-recommends /tmp/google-chrome.deb; \
     rm /tmp/google-chrome.deb; \

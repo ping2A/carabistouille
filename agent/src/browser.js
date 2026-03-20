@@ -29,8 +29,26 @@ const useExtraStealth = launcher !== puppeteer;
 export class BrowserManager {
   constructor() {
     this.sessions = new Map();
+    /** Analysis IDs whose page/session is closed or detached (e.g. Lightpanda). We no-op and avoid repeated logs. */
+    this.sessionDeadAnalysisIds = new Set();
     this.viewportWidth = config.browser.viewportWidth;
     this.viewportHeight = config.browser.viewportHeight;
+  }
+
+  _isSessionDeadError(err) {
+    const msg = err?.message || '';
+    return msg.includes('Session closed') || msg.includes('Target closed') || msg.includes('detached Frame');
+  }
+
+  _markSessionDead(analysisId) {
+    const wasAlreadyDead = this.sessionDeadAnalysisIds.has(analysisId);
+    this.sessionDeadAnalysisIds.add(analysisId);
+    return !wasAlreadyDead;
+  }
+
+  /** Call from analyzer when page/session is known dead (e.g. detached Frame) so screenshot/drain loops no-op. */
+  markSessionDead(analysisId) {
+    this._markSessionDead(analysisId);
   }
 
   /**
@@ -91,7 +109,8 @@ export class BrowserManager {
 
     await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
 
-    if (config.browser.bypassCSP) {
+    // setBypassCSP is Chrome CDP–specific; skip when connecting to a browser that may not support it (e.g. Lightpanda).
+    if (config.browser.bypassCSP && !wsEndpoint) {
       await page.setBypassCSP(true);
     }
 
@@ -225,6 +244,7 @@ export class BrowserManager {
    * @returns {Promise<{ data: string, width: number, height: number } | null>}
    */
   async takeScreenshot(analysisId) {
+    if (this.sessionDeadAnalysisIds.has(analysisId)) return null;
     try {
       const page = await this.getPage(analysisId);
       const format = config.screenshots?.format || 'webp';
@@ -248,6 +268,12 @@ export class BrowserManager {
         height: Math.round(h * dpr),
       };
     } catch (err) {
+      if (this._isSessionDeadError(err)) {
+        if (this._markSessionDead(analysisId)) {
+          console.warn(`[browser] Session closed/detached for ${analysisId}, skipping further screenshots and CDP calls`);
+        }
+        return null;
+      }
       console.error(`[browser] Screenshot error for ${analysisId}: ${err.message}`);
       return null;
     }
@@ -1034,6 +1060,7 @@ export class BrowserManager {
    * @returns {Promise<Array<{ content: string, timestamp?: number, method?: string }>>}
    */
   async drainClipboardCaptures(analysisId) {
+    if (this.sessionDeadAnalysisIds.has(analysisId)) return [];
     try {
       const page = await this.getPage(analysisId);
       const captures = await page.evaluate(() => {
@@ -1043,7 +1070,11 @@ export class BrowserManager {
       });
       return captures;
     } catch (err) {
-      console.warn(`[browser] Clipboard drain error for ${analysisId}: ${err.message}`);
+      if (this._isSessionDeadError(err)) {
+        this._markSessionDead(analysisId);
+      } else {
+        console.warn(`[browser] Clipboard drain error for ${analysisId}: ${err.message}`);
+      }
       return [];
     }
   }
@@ -1054,6 +1085,7 @@ export class BrowserManager {
    * @returns {Promise<Array<{ property: string, category: string, severity: string, description?: string, caller?: string, timestamp: number }>>}
    */
   async drainDetectionAttempts(analysisId) {
+    if (this.sessionDeadAnalysisIds.has(analysisId)) return [];
     try {
       const page = await this.getPage(analysisId);
       const attempts = await page.evaluate(() => {
@@ -1063,7 +1095,11 @@ export class BrowserManager {
       });
       return attempts;
     } catch (err) {
-      console.warn(`[browser] Detection drain error for ${analysisId}: ${err.message}`);
+      if (this._isSessionDeadError(err)) {
+        this._markSessionDead(analysisId);
+      } else {
+        console.warn(`[browser] Detection drain error for ${analysisId}: ${err.message}`);
+      }
       return [];
     }
   }
@@ -1127,6 +1163,7 @@ export class BrowserManager {
    * @param {string} analysisId - Analysis UUID.
    */
   async closeSession(analysisId) {
+    this.sessionDeadAnalysisIds.delete(analysisId);
     const session = this.sessions.get(analysisId);
     if (!session) return;
     this.sessions.delete(analysisId);

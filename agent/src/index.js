@@ -83,8 +83,9 @@ class Agent {
       console.log(`[agent] <- ${type} [${aid || ''}]`);
     }
 
-    const interactionCmd = ['click', 'scroll', 'move_mouse', 'type_text', 'key_press', 'inspect_element', 'stop_analysis'];
-    if (interactionCmd.includes(type) && aid && !this.browserManager.hasSession(aid)) {
+    // Commands that require a live browser session (stop_analysis is always processed so we can send analysis_complete even if session is gone).
+    const needsSession = ['click', 'scroll', 'move_mouse', 'type_text', 'key_press', 'inspect_element'];
+    if (needsSession.includes(type) && aid && !this.browserManager.hasSession(aid)) {
       return;
     }
 
@@ -157,6 +158,11 @@ class Agent {
           console.warn(`[agent] Unknown command type: ${type}`);
       }
     } catch (err) {
+      const isSessionClosed = err.message && (err.message.includes('Session closed') || err.message.includes('Target closed'));
+      if (isSessionClosed && aid) {
+        console.warn(`[agent] ${type} skipped for ${aid}: page/session closed (browser/CDP limitation)`);
+        return;
+      }
       console.error(`[agent] Error handling ${type}:`, err.message, err.stack);
       if (aid) {
         this.send({ type: 'error', analysis_id: aid, message: err.message });

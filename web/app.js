@@ -738,7 +738,6 @@ class App {
     this.connectionStatsEl = document.getElementById('connection-stats');
     this.connectionStatsBytesEl = document.getElementById('connection-stats-bytes');
     this.connectionStatsQualityEl = document.getElementById('connection-stats-quality');
-    this.sidebarConnectionStatsEl = document.getElementById('sidebar-connection-stats');
   }
 
   /** Form submit, tool buttons, stop, proxy toggle, tab clicks, search inputs, viewport click/scroll/mousemove, keyboard, resizer. */
@@ -816,7 +815,6 @@ class App {
       this.viewportVideo.addEventListener('click', (e) => this.handleViewportClick(e));
       this.viewportVideo.addEventListener('wheel', (e) => this.handleViewportScroll(e), { passive: false });
     }
-    // Document-level mousemove so we keep sending when pointer is over viewport even after clicking elsewhere (viewport loses focus)
     document.addEventListener('mousemove', (e) => {
       if (!this.ws || this.activeTool !== 'interact') return;
       const el = this.streamVideoMode === 'webrtc' && this.viewportVideo?.offsetParent != null
@@ -936,6 +934,9 @@ class App {
     } else {
       this.wsSend({ type: 'click', x, y });
     }
+    e.preventDefault();
+    if (e.target && typeof e.target.blur === 'function') e.target.blur();
+    document.body.focus();
   }
 
   /** Send scroll (delta_x, delta_y) to agent. */
@@ -1189,6 +1190,21 @@ class App {
     this.stopBtn.disabled = false;
   }
 
+  /** Update the sidebar analysis card status for the current analysis (e.g. when analysis_complete or error is received). */
+  updateSidebarStatusForCurrentAnalysis(status) {
+    try {
+      if (!this.currentAnalysisId || !this.analysesList) return;
+      const id = String(this.currentAnalysisId);
+      const card = this.analysesList.querySelector(`.analysis-card[data-id="${id}"]`);
+      if (!card) return;
+      const statusEl = card.querySelector('.analysis-status');
+      if (statusEl) {
+        statusEl.textContent = status;
+        statusEl.className = `analysis-status ${status}`;
+      }
+    } catch (_) {}
+  }
+
   /** Clear in-memory report data and re-render all panels; hide viewport image and stop button. */
   /** Clear all report data (network, scripts, console, raw, screenshots, security, risk) and re-render panels. */
   resetReportPanels() {
@@ -1432,7 +1448,7 @@ class App {
       console.log(`[ui] Viewer WS closed (code=${e.code}, reason=${e.reason})`);
       this._stopConnectionStatsInterval();
       if (this.connectionStatsEl) this.connectionStatsEl.style.display = 'none';
-      this.updateConnectionStats(); // clear sidebar connection stats
+      this.updateConnectionStats();
       // Do not reconnect if this analysis was finished (complete/error) or user switched away.
       if (this.currentAnalysisId !== analysisId) return;
       if (this.currentStatus === 'complete' || this.currentStatus === 'error') return;
@@ -1481,24 +1497,6 @@ class App {
     if (this.connectionStatsBytesEl) {
       this.connectionStatsBytesEl.textContent = bytesText;
       this.connectionStatsBytesEl.title = `Received: ${down}, Sent: ${up}`;
-    }
-    if (this.sidebarConnectionStatsEl) {
-      if (!isOpen) {
-        this.sidebarConnectionStatsEl.textContent = '—';
-        this.sidebarConnectionStatsEl.title = '';
-      } else {
-        let qualityPart = '';
-        if (this.webrtcPc && (this.webrtcRttMs != null || this.webrtcPacketsLost != null)) {
-          const parts = [];
-          if (this.webrtcRttMs != null) parts.push(`RTT ${Math.round(this.webrtcRttMs)} ms`);
-          if (this.webrtcPacketsLost != null) parts.push(`${this.webrtcPacketsLost}% loss`);
-          qualityPart = ' · ' + parts.join(' · ');
-        } else {
-          qualityPart = ' · WebSocket';
-        }
-        this.sidebarConnectionStatsEl.textContent = bytesText + qualityPart;
-        this.sidebarConnectionStatsEl.title = `Received: ${down}, Sent: ${up}${qualityPart}`;
-      }
     }
 
     const qualityEl = this.connectionStatsQualityEl;
@@ -1553,8 +1551,14 @@ class App {
   handleViewerEvent(event) {
     switch (event.type) {
       case 'screenshot':
-        if (this.streamVideoMode === 'webrtc') break; // Baliverne: video via WebRTC only, ignore screenshot
         this.screenshotCount++;
+        if (this.streamVideoMode === 'webrtc') {
+          // Baliverne: viewport is WebRTC; still update timeline count for report/tab
+          this.screenshotTimelineCount = this.screenshotCount;
+          const countEl = document.getElementById('count-screenshots');
+          if (countEl) countEl.textContent = this.screenshotCount;
+          break;
+        }
         if (!event.data || typeof event.data !== 'string') break;
         if (this.screenshotCount <= 3 || this.screenshotCount % 20 === 0) {
           console.log(`[ui] Screenshot #${this.screenshotCount} (${(event.data.length / 1024).toFixed(1)} KB)`);
@@ -1717,7 +1721,9 @@ class App {
 
       case 'analysis_complete':
         console.log(`[ui] Analysis complete, risk_score=${event.report?.risk_score}`);
+        this.currentStatus = 'complete';
         this.updateStopButton('complete');
+        this.updateSidebarStatusForCurrentAnalysis('complete');
         if (event.report) {
           this.networkRequests = event.report.network_requests || this.networkRequests;
           this.scripts = event.report.scripts || this.scripts;
@@ -1759,6 +1765,7 @@ class App {
       case 'error':
         console.error('[ui] Analysis error:', event.message);
         this.updateStopButton('error');
+        this.updateSidebarStatusForCurrentAnalysis('error');
         this.loadAnalyses();
         break;
 

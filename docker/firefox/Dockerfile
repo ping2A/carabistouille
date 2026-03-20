@@ -50,7 +50,7 @@ RUN sed -i '/Screen "dummy_screen"/a\    InputDevice "dummy_touchscreen" "CorePo
     cat /tmp/xorg-neko-input.conf >> /etc/baliverne/xorg.conf && rm /tmp/xorg-neko-input.conf
 
 COPY runtime/package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev && npx playwright install firefox --with-deps
 
 COPY runtime/*.js ./
 COPY docker/common/entrypoint.sh /entrypoint.sh

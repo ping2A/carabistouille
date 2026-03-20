@@ -269,8 +269,19 @@ export class Analyzer {
 
       if (state.aborted) return;
 
-      const title = await page.title();
-      const finalUrl = page.url();
+      let title = '';
+      let finalUrl = url;
+      try {
+        title = await page.title();
+        finalUrl = page.url();
+      } catch (e) {
+        // Lightpanda and some CDP backends may close the target or not support these; continue with fallbacks.
+        if (e.message && (e.message.includes('Target closed') || e.message.includes('Session closed'))) {
+          console.warn(`[analyzer] page.title/url failed (${e.message}), using fallbacks`);
+        } else {
+          throw e;
+        }
+      }
 
       console.log(`[analyzer] Navigation complete: url=${finalUrl} title="${title}"`);
       sendEvent({
@@ -330,6 +341,9 @@ export class Analyzer {
           console.log(`[analyzer] Page source captured (${html.length} chars)`);
         }
       } catch (err) {
+        if (err?.message && (err.message.includes('Session closed') || err.message.includes('Target closed') || err.message.includes('detached Frame'))) {
+          this.browserManager.markSessionDead(analysisId);
+        }
         console.warn(`[analyzer] Page source capture error: ${err.message}`);
       }
 
@@ -356,14 +370,27 @@ export class Analyzer {
           console.log(`[analyzer] Found ${inlineScripts.length} inline scripts`);
         }
       } catch (err) {
+        if (err?.message && (err.message.includes('Session closed') || err.message.includes('Target closed') || err.message.includes('detached Frame'))) {
+          this.browserManager.markSessionDead(analysisId);
+        }
         console.warn(`[analyzer] Inline script scan error: ${err.message}`);
       }
 
       console.log(`[analyzer] Analysis ${analysisId} is now live — waiting for user to finish`);
     } catch (err) {
       if (state.aborted) return;
-      console.error(`[analyzer] Navigation error for ${analysisId}: ${err.message}`);
-      sendEvent({ type: 'error', analysis_id: analysisId, message: err.message });
+      const isTargetClosed = err.message && (err.message.includes('Target closed') || err.message.includes('Session closed'));
+      if (isTargetClosed) {
+        console.warn(`[analyzer] Page target closed during analysis (${analysisId}): ${err.message}. Use Finish for partial report.`);
+        sendEvent({
+          type: 'error',
+          analysis_id: analysisId,
+          message: 'Page was closed during load (browser/CDP limitation). Click Finish for partial report.',
+        });
+      } else {
+        console.error(`[analyzer] Navigation error for ${analysisId}: ${err.message}`);
+        sendEvent({ type: 'error', analysis_id: analysisId, message: err.message });
+      }
       this.cleanupAnalysis(analysisId);
     }
   }

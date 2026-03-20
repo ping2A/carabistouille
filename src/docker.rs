@@ -9,10 +9,8 @@ use tokio::process::Command;
 
 const IMAGE_NAME: &str = "carabistouille-agent";
 const CONTAINER_NAME: &str = "carabistouille-agent";
-const LIGHTPANDA_IMAGE: &str = "lightpanda/browser:nightly";
-const LIGHTPANDA_CONTAINER: &str = "carabistouille-lightpanda";
-const LIGHTPANDA_NETWORK: &str = "carabistouille-net";
-const LIGHTPANDA_CDP_PORT: u16 = 9222;
+/// Single-container image: Lightpanda + agent (no separate browser container).
+const LIGHTPANDA_AGENT_IMAGE: &str = "carabistouille-agent-lightpanda";
 
 /// Path to the docker binary. Tries PATH first, then common install locations (e.g. when run from IDE with minimal PATH).
 fn docker_binary() -> String {
@@ -85,53 +83,63 @@ pub async fn ensure_image(agent_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Start the Lightpanda browser container and create network. No-op if image pull/run fails (logs and returns Err).
-async fn start_lightpanda_container(docker: &str) -> Result<(), String> {
-    // Remove stale Lightpanda container if any
-    let _ = Command::new(docker)
-        .args(["rm", "-f", LIGHTPANDA_CONTAINER])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-
-    tracing::info!("Creating network '{}' (if not exists)", LIGHTPANDA_NETWORK);
-    let _ = Command::new(docker)
-        .args(["network", "create", LIGHTPANDA_NETWORK])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
-
-    tracing::info!("Starting Lightpanda browser container '{}' (image: {})", LIGHTPANDA_CONTAINER, LIGHTPANDA_IMAGE);
-    let out = Command::new(docker)
+/// Build the single-container Lightpanda image (Lightpanda + agent in one). Used when `--agent docker:lightpanda`.
+pub async fn ensure_lightpanda_image(agent_dir: &std::path::Path) -> Result<(), String> {
+    if !agent_dir.is_dir() {
+        return Err(format!(
+            "Agent directory does not exist or is not a directory: {}",
+            agent_dir.display()
+        ));
+    }
+    let docker = docker_binary();
+    let dockerfile = agent_dir.join("Dockerfile.lightpanda");
+    if !dockerfile.exists() {
+        return Err(format!(
+            "Dockerfile.lightpanda not found in agent directory: {}",
+            agent_dir.display()
+        ));
+    }
+    tracing::info!(
+        "Building Docker image '{}' from {} (Dockerfile.lightpanda)",
+        LIGHTPANDA_AGENT_IMAGE,
+        agent_dir.display()
+    );
+    let output = Command::new(&docker)
         .args([
-            "run",
-            "-d",
+            "build",
             "--platform",
             "linux/amd64",
-            "--name",
-            LIGHTPANDA_CONTAINER,
-            "--network",
-            LIGHTPANDA_NETWORK,
-            "-p",
-            &format!("{}:{}", LIGHTPANDA_CDP_PORT, LIGHTPANDA_CDP_PORT),
-            LIGHTPANDA_IMAGE,
+            "-f",
+            "Dockerfile.lightpanda",
+            "-t",
+            LIGHTPANDA_AGENT_IMAGE,
+            ".",
         ])
+        .current_dir(agent_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .output()
         .await
-        .map_err(|e| format!("Failed to run Lightpanda container: {e}"))?;
+        .map_err(|e| {
+            if e.raw_os_error() == Some(2) {
+                format!(
+                    "Docker not found. Build manually: cd agent && docker build --platform linux/amd64 -f Dockerfile.lightpanda -t {} .",
+                    LIGHTPANDA_AGENT_IMAGE
+                )
+            } else {
+                format!("Failed to run docker build: {e}")
+            }
+        })?;
 
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("Lightpanda container start failed: {stderr}. Pull the image with: docker pull {LIGHTPANDA_IMAGE}"));
+    if !output.status.success() {
+        return Err("docker build (Dockerfile.lightpanda) failed — check output above".into());
     }
-    tracing::info!("Lightpanda container '{}' started (CDP on port {})", LIGHTPANDA_CONTAINER, LIGHTPANDA_CDP_PORT);
+    tracing::info!("Docker image '{}' ready", LIGHTPANDA_AGENT_IMAGE);
     Ok(())
 }
 
 /// Start the agent container (removes any stale container first).
-/// When `lightpanda` is true, starts the Lightpanda browser container first and passes BROWSER_WS_ENDPOINT to the agent.
+/// When `lightpanda` is true, uses the single-container image (Lightpanda + agent in one); no separate browser container.
 /// `server_port` is the host port the server listens on.
 /// `use_tls`: if true, the main server uses HTTPS, so the agent must connect with wss://.
 /// `browser_engine` selects puppeteer or puppeteer-extra inside the container.
@@ -148,10 +156,6 @@ pub async fn start_container(
 ) -> Result<String, String> {
     let docker = docker_binary();
 
-    if lightpanda {
-        start_lightpanda_container(&docker).await?;
-    }
-
     // Remove stale agent container if any
     let _ = Command::new(&docker)
         .args(["rm", "-f", CONTAINER_NAME])
@@ -162,10 +166,16 @@ pub async fn start_container(
 
     let scheme = if use_tls { "wss" } else { "ws" };
     let server_url = format!("{scheme}://host.docker.internal:{server_port}/ws/agent");
+    let image = if lightpanda {
+        LIGHTPANDA_AGENT_IMAGE
+    } else {
+        IMAGE_NAME
+    };
 
     tracing::info!(
-        "Starting Docker agent container '{}' (engine={}, server={}, real_chrome={}, lightpanda={}, wireguard={})",
+        "Starting Docker agent container '{}' (image={}, engine={}, server={}, real_chrome={}, lightpanda={}, wireguard={})",
         CONTAINER_NAME,
+        image,
         browser_engine,
         server_url,
         real_chrome,
@@ -175,9 +185,6 @@ pub async fn start_container(
 
     let server_url_env = format!("SERVER_URL={server_url}");
     let browser_engine_env = format!("BROWSER_ENGINE={browser_engine}");
-    let lightpanda_env = lightpanda.then(|| {
-        format!("BROWSER_WS_ENDPOINT=ws://{}:{}", LIGHTPANDA_CONTAINER, LIGHTPANDA_CDP_PORT)
-    });
 
     let mut args = vec![
         "run",
@@ -193,14 +200,6 @@ pub async fn start_container(
         "-e",
         browser_engine_env.as_str(),
     ];
-    if lightpanda {
-        args.push("--network");
-        args.push(LIGHTPANDA_NETWORK);
-        if let Some(ref e) = lightpanda_env {
-            args.push("-e");
-            args.push(e.as_str());
-        }
-    }
     if real_chrome {
         args.push("-e");
         args.push("HEADLESS=false");
@@ -228,7 +227,7 @@ pub async fn start_container(
         args.push("-e");
         args.push("WIREGUARD_CONFIG_PATH=/etc/wireguard/wg0.conf");
     }
-    args.push(IMAGE_NAME);
+    args.push(image);
 
     let output = Command::new(&docker)
         .args(args)
@@ -250,8 +249,7 @@ pub async fn start_container(
     Ok(container_id)
 }
 
-/// Stop and remove the agent container (and Lightpanda container if present). Uses `docker rm -f`.
-/// Logs but does not fail; idempotent (no-op if containers already gone).
+/// Stop and remove the agent container. Uses `docker rm -f`. Idempotent (no-op if container already gone).
 pub async fn stop_container() {
     let docker = docker_binary();
     tracing::info!("Stopping and removing Docker agent container '{}'", CONTAINER_NAME);
@@ -269,19 +267,6 @@ pub async fn stop_container() {
             }
         }
         Err(e) => tracing::warn!(error = %e, "failed to run docker rm -f {}", CONTAINER_NAME),
-    }
-    tracing::info!("Stopping and removing Lightpanda container '{}' (if present)", LIGHTPANDA_CONTAINER);
-    match Command::new(&docker)
-        .args(["rm", "-f", LIGHTPANDA_CONTAINER])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-    {
-        Ok(s) if s.success() => tracing::info!("Lightpanda container '{}' removed", LIGHTPANDA_CONTAINER),
-        Ok(s) if s.code() == Some(1) => {}
-        Ok(s) => tracing::warn!(code = ?s.code(), "docker rm -f {} failed", LIGHTPANDA_CONTAINER),
-        Err(e) => tracing::warn!(error = %e, "failed to run docker rm -f {}", LIGHTPANDA_CONTAINER),
     }
 }
 

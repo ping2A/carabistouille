@@ -30,8 +30,12 @@ pub use state::AppState;
 pub fn build_router(state: AppState, include_mcp_route: bool) -> Router {
     let mut app = Router::new()
         .route("/api/status", get(api::routes::get_status))
-        .route("/api/analyses", post(api::routes::create_analysis))
-        .route("/api/analyses", get(api::routes::list_analyses))
+        .route(
+            "/api/analyses",
+            get(api::routes::list_analyses)
+                .post(api::routes::create_analysis)
+                .delete(api::routes::delete_all_analyses),
+        )
         .route(
             "/api/analyses/:id",
             get(api::routes::get_analysis)

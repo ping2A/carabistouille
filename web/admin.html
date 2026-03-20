@@ -26,21 +26,31 @@
         </select>
       </div>
       <a href="/" class="header-link" data-i18n="app.analyzer">Analyzer</a>
-      <span id="agent-status" class="status disconnected">
-        <span class="status-dot"></span>
-        <span class="status-text" data-i18n="app.agentDisconnected">Agent disconnected</span>
-      </span>
+      <div id="agent-info" class="agent-info">
+        <span id="agent-status" class="status disconnected">
+          <span class="status-dot"></span>
+          <span class="status-text" data-i18n="app.agentDisconnected">Agent disconnected</span>
+        </span>
+        <span id="agent-mode" class="agent-mode" style="display:none" aria-hidden="true"></span>
+      </div>
     </div>
   </header>
 
   <main class="admin-main">
     <div class="admin-topbar">
       <div class="admin-stats" id="admin-stats"></div>
-      <div class="admin-actions">
-        <button id="refresh-btn" class="action-btn">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-          <span data-i18n="admin.refresh">Refresh</span>
-        </button>
+      <div class="admin-toolbar">
+        <input type="search" id="admin-search" class="admin-search" data-i18n-placeholder="admin.searchPlaceholder" placeholder="Search URL, status, verdict…" aria-label="Search analyses">
+        <div class="admin-actions">
+          <button id="refresh-btn" class="action-btn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            <span data-i18n="admin.refresh">Refresh</span>
+          </button>
+          <button id="cleanup-db-btn" class="action-btn action-btn-danger" title="Delete all analyses from the database" data-i18n-title="admin.cleanupDbTitle">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            <span data-i18n="admin.cleanupDb">Clean up database</span>
+          </button>
+        </div>
       </div>
     </div>
 

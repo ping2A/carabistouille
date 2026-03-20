@@ -77,17 +77,44 @@ async fn handle_runtime_socket(
     debug!(%session_id, %room_id, %analysis_id, "handle_runtime_socket: runtime_tx set");
     info!(%session_id, %room_id, %analysis_id, "Baliverne runtime connected");
 
-    // Send initial Navigate from the analysis (url was set when analysis was created).
+    // Send initial Navigate from the analysis (url + run_options for Baliverne runtime).
     if let Some(analysis) = state.analyses.get(&analysis_id) {
+        let opts = analysis.run_options.as_ref();
         let nav = serde_json::json!({
             "type": "navigate",
             "url": analysis.url,
-            "proxy": analysis.run_options.as_ref().and_then(|o| o.proxy.clone()),
-            "user_agent": analysis.run_options.as_ref().and_then(|o| o.user_agent.clone()),
+            "proxy": opts.and_then(|o| o.proxy.clone()),
+            "user_agent": opts.and_then(|o| o.user_agent.clone()),
+            "viewport_width": opts.and_then(|o| o.viewport_width),
+            "viewport_height": opts.and_then(|o| o.viewport_height),
+            "device_scale_factor": opts.and_then(|o| o.device_scale_factor),
+            "is_mobile": opts.and_then(|o| o.is_mobile),
+            "timezone_id": opts.and_then(|o| o.timezone_id.clone()),
+            "locale": opts.and_then(|o| o.locale.clone()),
+            "latitude": opts.and_then(|o| o.latitude),
+            "longitude": opts.and_then(|o| o.longitude),
+            "accuracy": opts.and_then(|o| o.accuracy),
+            "network_throttling": opts.and_then(|o| o.network_throttling.clone()),
         });
         if let Ok(bytes) = serde_json::to_vec(&nav) {
             let _ = cmd_tx_for_nav.send(bytes).await;
-            debug!(%session_id, %analysis_id, url = %analysis.url, "handle_runtime_socket: sent initial navigate");
+            if let Some(o) = opts {
+                info!(
+                    %session_id,
+                    %analysis_id,
+                    url = %analysis.url,
+                    viewport = ?o.viewport_width.zip(o.viewport_height).map(|(w, h)| format!("{}x{}", w, h)),
+                    proxy = o.proxy.is_some(),
+                    user_agent = o.user_agent.is_some(),
+                    timezone = ?o.timezone_id.as_deref(),
+                    locale = ?o.locale.as_deref(),
+                    geo = o.latitude.is_some() && o.longitude.is_some(),
+                    network_throttling = ?o.network_throttling.as_deref(),
+                    "sent initial navigate with run_options"
+                );
+            } else {
+                debug!(%session_id, %analysis_id, url = %analysis.url, "handle_runtime_socket: sent initial navigate (no run_options)");
+            }
         }
     } else {
         debug!(%session_id, %analysis_id, "handle_runtime_socket: no analysis for initial navigate");

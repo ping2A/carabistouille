@@ -4,6 +4,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use carabistouille::{build_mcp_router, build_router, AppState};
+use chrono::Utc;
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
 /// Agent mode: how the server gets browser automation (local process, Docker container, or Baliverne).
@@ -155,6 +157,16 @@ struct CliArgs {
     baliverne_browser: Option<String>,
     wireguard_config: Option<std::path::PathBuf>,
     listen: Option<String>,
+    /// When set, duplicate all log output to this file (in addition to stdout).
+    log_file: Option<PathBuf>,
+}
+
+/// Default log filename with date and hour for uniqueness: carabistouille-YYYY-MM-DD-HH.log
+fn default_log_filename() -> String {
+    format!(
+        "carabistouille-{}.log",
+        Utc::now().format("%Y-%m-%d-%H")
+    )
 }
 
 /// Parse command-line arguments: --clean-db, --database, --agent, --listen, etc.
@@ -258,6 +270,21 @@ fn parse_args() -> CliArgs {
         .or_else(|| std::env::var("MCP_PORT").ok().and_then(|p| p.parse().ok()))
         .unwrap_or(3001);
 
+    let log_file = args
+        .iter()
+        .position(|a| a == "--log-file")
+        .and_then(|i| args.get(i + 1).cloned())
+        .or_else(|| std::env::var("LOG_FILE").ok())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            if args.iter().any(|a| a == "--log-file") || std::env::var("LOG_FILE").is_ok() {
+                Some(PathBuf::from(default_log_filename()))
+            } else {
+                None
+            }
+        });
+
     CliArgs {
         clean_db,
         database,
@@ -268,6 +295,7 @@ fn parse_args() -> CliArgs {
         baliverne_browser,
         wireguard_config,
         listen,
+        log_file,
     }
 }
 
@@ -393,14 +421,41 @@ async fn main() {
         .install_default()
         .expect("rustls default crypto provider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("carabistouille=debug".parse().unwrap()),
-        )
-        .init();
-
     let cli = parse_args();
+
+    let filter = EnvFilter::from_default_env()
+        .add_directive("carabistouille=debug".parse().unwrap());
+
+    if let Some(ref log_path) = cli.log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .write(true)
+            .open(log_path)
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to open log file {:?}: {}", log_path, e);
+                std::process::exit(1);
+            });
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stdout)
+                    .with_ansi(true)
+                    .with_filter(filter.clone()),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(file)
+                    .with_ansi(false)
+                    .with_filter(filter),
+            )
+            .init();
+        tracing::info!("Logging to stdout and to {:?}", log_path);
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .init();
+    }
 
     let db_path: PathBuf = cli
         .database
@@ -546,7 +601,12 @@ async fn main() {
                 .canonicalize()
                 .unwrap_or_else(|_| std::path::PathBuf::from(&agent_dir));
 
-            if let Err(e) = carabistouille::docker::ensure_image(&agent_path).await {
+            if cli.agent.docker_lightpanda() {
+                if let Err(e) = carabistouille::docker::ensure_lightpanda_image(&agent_path).await {
+                    tracing::error!("Failed to build Docker Lightpanda agent image: {}", e);
+                    std::process::exit(1);
+                }
+            } else if let Err(e) = carabistouille::docker::ensure_image(&agent_path).await {
                 tracing::error!("Failed to build Docker agent image: {}", e);
                 std::process::exit(1);
             }
